@@ -14,8 +14,7 @@ dependencies = [
     "pydantic-settings>=2.6,<3",
     "psycopg[binary]>=3.2,<4",
     "redis>=5.2,<6",
-    "redis>=5.2,<6",
-    "psycopg[binary]>=3.2,<4",
+    "slack-cli-hooks<1.0.0",
     "slack-bolt>=1.21,<2",
     "uvicorn[standard]>=0.30,<1",
 ]

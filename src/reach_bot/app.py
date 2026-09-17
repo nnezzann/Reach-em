@@ -94,3 +94,9 @@ async def health() -> dict[str, str]:
 @api.api_route("/slack/events", methods=["GET", "POST"])
 async def slack_events(request: Request) -> Any:
     return await slack_handler.handle(request)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(api, host=settings.host, port=settings.port)

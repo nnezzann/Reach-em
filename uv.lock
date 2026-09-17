@@ -1094,6 +1094,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "redis" },
     { name = "slack-bolt" },
+    { name = "slack-cli-hooks" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1119,6 +1120,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5.2,<6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
     { name = "slack-bolt", specifier = ">=1.21,<2" },
+    { name = "slack-cli-hooks", specifier = "<1.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
 ]
 provides-extras = ["dev"]
@@ -1170,6 +1172,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e3/4f/5ba15533d66da2e7174334cc0e2805142e5390c9f4c5f31633df78b17006/slack_bolt-1.30.0.tar.gz", hash = "sha256:af38258d41f801ad9c74503090e0f39accd66c49f667f7e55c97fcdb0e51b886", size = 131180, upload-time = "2026-07-15T20:47:33.679Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2f/ee/1a7a286cf98fa3f4eeffaabc090e82f58f058ab4812aa1d7421d92c2637a/slack_bolt-1.30.0-py2.py3-none-any.whl", hash = "sha256:81f5bc46e79516d23d5e2a31dded6304dd1b8b6b72c0083f2f31d5d801e262c4", size = 235341, upload-time = "2026-07-15T20:47:32.113Z" },
+]
+
+[[package]]
+name = "slack-cli-hooks"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "slack-bolt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/02/abc3639125c62f756e852bb0d72aebc778b1d798b4561cfea44bf6062b7b/slack_cli_hooks-0.3.0.tar.gz", hash = "sha256:88e1e78528d94d686bdb46a6242d023975479472b97625aa73c1c953775d5663", size = 9771, upload-time = "2026-02-05T22:19:46.096Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/45/e183cc4e65ae3e092b89134f4016fa83982318a8ea1a3bb6c5769adf4033/slack_cli_hooks-0.3.0-py3-none-any.whl", hash = "sha256:3639d4f5b56f822da7fb93660996849df5d2b8544cca968a46ee012b89c94fd1", size = 11169, upload-time = "2026-02-05T22:19:45.085Z" },
 ]
 
 [[package]]
