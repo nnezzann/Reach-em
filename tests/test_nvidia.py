@@ -23,13 +23,18 @@ class FakeResponse:
 
 
 class FakeSession:
-    def post(self, *_args, **_kwargs):
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+
+    def post(self, *_args, **kwargs):
+        self.headers = kwargs["headers"]
         return FakeResponse()
 
 
 @pytest.mark.asyncio
 async def test_success_parses_openai_compatible_response() -> None:
-    client = NvidiaClient("secret", session=FakeSession())  # type: ignore[arg-type]
+    session = FakeSession()
+    client = NvidiaClient("secret", session=session)  # type: ignore[arg-type]
 
     assert await client.complete([{"role": "user", "content": "hi"}]) == "hello"
-
+    assert session.headers == {"Authorization": "Bearer secret"}
