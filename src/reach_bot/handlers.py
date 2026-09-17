@@ -16,6 +16,13 @@ from reach_bot.rendering import render_ping_modal, render_why
 logger = logging.getLogger(__name__)
 
 
+def is_direct_message_command(command: dict[str, Any]) -> bool:
+    """Accept Slack DM payloads even when channel_type is omitted."""
+    channel_type = str(command.get("channel_type", "")).lower()
+    channel_id = str(command.get("channel_id", ""))
+    return channel_type == "im" or channel_id.startswith("D")
+
+
 def parse_command(text: str) -> tuple[str, str | None]:
     parts = text.strip().split(maxsplit=1)
     if not parts:
@@ -145,10 +152,13 @@ def register_handlers(
             request_id,
             command.get("channel_type"),
         )
-        if command.get("channel_type") != "im":
+        if not is_direct_message_command(command):
             await respond(
                 response_type="ephemeral",
-                text="Please open a direct message with Reach and use /reach there.",
+                text=(
+                    "Please open Reach's Messages tab and use `/reach` there. "
+                    "Slack slash commands cannot be used inside assistant threads."
+                ),
             )
             return
         if not text:
