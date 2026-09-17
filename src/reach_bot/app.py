@@ -78,6 +78,8 @@ api = FastAPI(title="Reach'em", version="0.1.0")
 
 
 def do_rank(target_id: str, requester_id: str) -> RankedCandidates:
+    if isinstance(provider, SlackSignalProvider):
+        target_id = provider.resolve_user(target_id)
     return rank_candidates(
         target_id,
         requester_id,

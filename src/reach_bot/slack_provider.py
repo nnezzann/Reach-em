@@ -24,6 +24,22 @@ class SlackSignalProvider:
         channels: list[dict[str, Any]] = result.get("channels", [])
         return [str(channel["id"]) for channel in channels if not channel.get("is_private", False)]
 
+    def resolve_user(self, target: str) -> str:
+        normalized = target.strip().strip("<@>").removeprefix("@").lower()
+        if normalized.startswith(("u", "w")) and normalized[1:].isalnum():
+            return normalized.upper()
+        response = self.client.users_list(limit=1000)
+        members: list[dict[str, Any]] = response.get("members", [])
+        for user in members:
+            names = {
+                str(user.get("name", "")).lower(),
+                str(user.get("real_name", "")).lower(),
+                str(user.get("profile", {}).get("display_name", "")).lower(),
+            }
+            if normalized in names and user.get("id"):
+                return str(user["id"])
+        raise ValueError(f"Slack user @{normalized} was not found.")
+
     def channel_members(self, channel_id: str) -> list[str]:
         result = self.client.conversations_members(channel=channel_id)
         members: list[str] = result.get("members", [])

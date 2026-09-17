@@ -5,6 +5,8 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from slack_sdk.errors import SlackApiError
+
 from reach_bot.persistence import PingOutcome, ReachRepository
 from reach_bot.rendering import render_ping_modal, render_why
 
@@ -67,8 +69,9 @@ def register_handlers(
                 response_type="ephemeral",
                 blocks=renderer(target, ranked, note, ping_ids),
             )
-        except ValueError as exc:
-            await respond(response_type="ephemeral", text=str(exc))
+        except (ValueError, SlackApiError) as exc:
+            message = str(exc) if isinstance(exc, ValueError) else "Slack could not find that user."
+            await respond(response_type="ephemeral", text=message)
 
     @slack_app.action("ping_candidate")  # type: ignore[untyped-decorator]
     async def ping_candidate(
