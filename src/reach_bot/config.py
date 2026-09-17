@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     slack_bot_token: str
+    slack_app_token: str | None = None
     slack_signing_secret: str | None = None
     database_url: str | None = None
     redis_url: str | None = None

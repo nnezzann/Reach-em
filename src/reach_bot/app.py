@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from fastapi import FastAPI, Request
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 from slack_sdk import WebClient
 
@@ -66,7 +68,11 @@ if settings.redis_url:
         RedisPresenceCache(redis.Redis.from_url(settings.redis_url)),
         settings.presence_cache_ttl_seconds,
     )
-slack_app = AsyncApp(token=settings.slack_bot_token, signing_secret=settings.slack_signing_secret)
+slack_app = AsyncApp(
+    token=settings.slack_bot_token,
+    signing_secret=settings.slack_signing_secret,
+    request_verification_enabled=settings.slack_signing_secret is not None,
+)
 slack_handler = AsyncSlackRequestHandler(slack_app)
 api = FastAPI(title="Reach'em", version="0.1.0")
 
@@ -97,6 +103,9 @@ async def slack_events(request: Request) -> Any:
 
 
 if __name__ == "__main__":
-    import uvicorn
+    if settings.slack_app_token:
+        asyncio.run(AsyncSocketModeHandler(slack_app, settings.slack_app_token).start_async())  # type: ignore[no-untyped-call]
+    else:
+        import uvicorn
 
-    uvicorn.run(api, host=settings.host, port=settings.port)
+        uvicorn.run(api, host=settings.host, port=settings.port)
