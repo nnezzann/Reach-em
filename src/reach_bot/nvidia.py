@@ -18,7 +18,7 @@ class NvidiaClient:
         self,
         api_key: str | None,
         base_url: str = "https://integrate.api.nvidia.com/v1",
-        model: str = "nvidia/nemotron-3.5-1lightning-30b-a3b",
+        model: str = "nvidia/nemotron-3.5-lightning-30b-a3b",
         timeout_seconds: float = 30.0,
         session: aiohttp.ClientSession | None = None,
     ) -> None:

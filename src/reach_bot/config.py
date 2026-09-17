@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     presence_cache_ttl_seconds: int = 45
     nvidia_api_key: str | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nvidia_model: str = "nvidia/nemotron-3.5-1lightning-30b-a3b"
+    nvidia_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     nvidia_timeout_seconds: float = 30.0
     conversation_max_messages: int = 20
     conversation_max_characters: int = 12000
