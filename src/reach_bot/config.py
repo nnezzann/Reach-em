@@ -6,15 +6,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     slack_bot_token: str
     slack_signing_secret: str
+    database_url: str | None = None
+    redis_url: str | None = None
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
+    min_sample_threshold: int = 3
+    max_per_bucket: int = 3
+    thread_recency_days: int = 7
+    include_thread_signal: bool = False
+    affinity_decay_halflife_days: float = 30.0
+    presence_cache_ttl_seconds: int = 45
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
 

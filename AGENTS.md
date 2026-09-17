@@ -136,7 +136,7 @@ This is the only "form" in the system — one field, pre-filled, editable. No mu
 
 ## 9. Open Decisions (flag to requester if ambiguous during implementation)
 
-- Tech stack: not yet locked (Node vs Python) — confirm before scaffolding.
+- Tech stack: Python, using the locked `uv` workflow and the dependencies declared in `pyproject.toml`.
 - Whether the bot sends the ping DM as itself ("relaying for Niel") or the requester sends it directly via a Slack-generated draft — confirm before building the send path.
 - Default recency window for thread co-occurrence (currently proposed: 7 days) — adjustable, not fixed by this spec.
 
