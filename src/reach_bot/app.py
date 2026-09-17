@@ -35,6 +35,8 @@ settings = get_settings()
 configure_logging(settings.log_level, settings.log_file)
 logger = logging.getLogger(__name__)
 logger.info("Reach'em app starting")
+if not settings.nvidia_api_key:
+    logger.warning("NVIDIA assistant is disabled: NVIDIA_API_KEY is not configured")
 
 
 class EmptySignalProvider:
