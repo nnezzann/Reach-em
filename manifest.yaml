@@ -8,6 +8,11 @@ features:
     home_tab_enabled: true
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
+  assistant_view:
+    assistant_description: Reach helps you find the smallest useful audience when a teammate is unavailable.
+    suggested_prompts:
+      - title: Ask Reach for help
+        message: Help me reach the right teammate for this request.
   bot_user:
     display_name: Reach
     always_online: false
@@ -23,6 +28,7 @@ oauth_config:
       - commands
       - chat:write
       - im:history
+      - assistant:write
 
 settings:
   interactivity:
@@ -32,4 +38,5 @@ settings:
   event_subscriptions:
     bot_events:
       - message.im
+      - assistant_thread_started
   token_rotation_enabled: false
