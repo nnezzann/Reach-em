@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import uuid4
 
-from slack_sdk.errors import SlackApiError
-
+from reach_bot.conversation import ConversationStore
+from reach_bot.nvidia import NvidiaClient, NvidiaClientError
 from reach_bot.persistence import PingOutcome, ReachRepository
 from reach_bot.rendering import render_ping_modal, render_why
+
+logger = logging.getLogger(__name__)
 
 
 def parse_command(text: str) -> tuple[str, str | None]:
@@ -43,35 +48,125 @@ def register_handlers(
     repository: ReachRepository,
     ranker: Callable[..., Any],
     renderer: Callable[..., list[dict[str, Any]]],
+    assistant: NvidiaClient | None = None,
+    conversations: ConversationStore | None = None,
 ) -> None:
+    assistant = assistant or NvidiaClient(None)
+    conversations = conversations or ConversationStore()
+
+    async def answer_in_dm(
+        *,
+        user_id: str,
+        channel_id: str,
+        text: str,
+        client: Any,
+        thread_ts: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        request_id = request_id or uuid4().hex
+        key = f"{user_id}:{channel_id}"
+        conversations.add(key, "user", text)
+        try:
+            response = await assistant.complete(
+                [
+                    {"role": message.role, "content": message.content}
+                    for message in conversations.get(key)
+                ]
+            )
+        except NvidiaClientError as exc:
+            logger.warning(
+                "assistant response failed request_id=%s category=%s",
+                request_id,
+                type(exc).__name__,
+            )
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=str(exc),
+                **({"thread_ts": thread_ts} if thread_ts else {}),
+            )
+            return
+        conversations.add(key, "assistant", response)
+        try:
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=response,
+                **({"thread_ts": thread_ts} if thread_ts else {}),
+            )
+        except Exception:
+            logger.exception("Slack reply failed request_id=%s", request_id)
+            raise
+
+    async def safe_answer(**kwargs: Any) -> None:
+        try:
+            await answer_in_dm(**kwargs)
+        except Exception:
+            logger.exception("DM assistant handler failed")
+
+    @slack_app.event("message")  # type: ignore[untyped-decorator]
+    async def dm_message(event: dict[str, Any], client: Any) -> None:
+        if (
+            event.get("subtype")
+            or event.get("bot_id")
+            or not event.get("user")
+            or event.get("channel_type") != "im"
+            or not str(event.get("text", "")).strip()
+        ):
+            return
+        logger.info("DM message received channel_type=%s", event.get("channel_type"))
+        request_id = uuid4().hex
+        logger.info("DM assistant request started request_id=%s", request_id)
+        asyncio.create_task(
+            safe_answer(
+                user_id=str(event["user"]),
+                channel_id=str(event["channel"]),
+                text=str(event["text"]).strip(),
+                client=client,
+                thread_ts=str(event.get("thread_ts") or event.get("ts") or "") or None,
+                request_id=request_id,
+            )
+        )
+
     @slack_app.command("/reach")  # type: ignore[untyped-decorator]
     async def reach_command(
         ack: Callable[..., Awaitable[None]],
         command: dict[str, Any],
         respond: Callable[..., Awaitable[None]],
+        client: Any,
     ) -> None:
-        await ack()
         try:
-            target, note = parse_command(command.get("text", ""))
-            ranked = ranker(target, command["user_id"])
-            shown = (*ranked.active, *ranked.offline)
-            ping_ids = {
-                candidate.user_id: repository.create_ping(
-                    command["user_id"],
-                    target,
-                    candidate.user_id,
-                    candidate.evidence[0] if candidate.evidence else None,
-                    candidate.presence,
-                ).id
-                for candidate in shown
-            }
+            await ack()
+        except Exception:
+            logger.exception("Slack slash command acknowledgement failed")
+            raise
+        text = str(command.get("text", "")).strip()
+        request_id = uuid4().hex
+        logger.info(
+            "slash command received request_id=%s channel_type=%s",
+            request_id,
+            command.get("channel_type"),
+        )
+        if command.get("channel_type") != "im":
             await respond(
                 response_type="ephemeral",
-                blocks=renderer(target, ranked, note, ping_ids),
+                text="Please open a direct message with Reach and use /reach there.",
             )
-        except (ValueError, SlackApiError) as exc:
-            message = str(exc) if isinstance(exc, ValueError) else "Slack could not find that user."
-            await respond(response_type="ephemeral", text=message)
+            return
+        if not text:
+            await client.chat_postMessage(
+                channel=command["channel_id"],
+                text=(
+                    "Tell me what you need help with, for example: "
+                    "`/reach find the deploy owner`."
+                ),
+            )
+            return
+        await answer_in_dm(
+            user_id=str(command["user_id"]),
+            channel_id=str(command["channel_id"]),
+            text=text,
+            client=client,
+            request_id=request_id,
+        )
 
     @slack_app.action("ping_candidate")  # type: ignore[untyped-decorator]
     async def ping_candidate(

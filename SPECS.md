@@ -9,6 +9,13 @@ source of truth — this document covers *how* to build it.
 
 ## 1. System Overview
 
+The primary interface is a conversational assistant in Slack direct messages.
+DM message events and `/reach` commands issued inside the app's DM are
+acknowledged immediately, then answered through the NVIDIA-compatible chat
+completion API. Conversation history is short-lived, bounded in memory, and
+kept separate from public-channel ranking data. `/reach` outside a DM returns
+an ephemeral instruction to DM the app.
+
 A Slack app (slash command + interactivity endpoints) that, given a target
 user, returns a ranked, categorized, minimal list of candidates likely to
 help reach them — combining live Slack signals (presence, channel
@@ -161,6 +168,14 @@ Expose as environment variables / config, not hardcoded:
 ---
 
 ## 5. Slack App Surface
+
+### 5.0 Conversational DM assistant
+- Subscribe to `message.im` and ignore bot/subtype events to prevent loops.
+- Never read arbitrary channel history; only process the event payload.
+- Ack slash commands before making the slow model request.
+- Keep per-user/per-DM history bounded by configurable message and character
+  limits.
+- Configure NVIDIA API credentials and model through environment settings.
 
 ### 5.1 Slash command: `/reach @X [note]`
 - Verify request signature (Bolt handles this).

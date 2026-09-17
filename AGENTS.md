@@ -15,6 +15,13 @@ Slack workspaces have a recurring failure mode: when someone needs to reach a pe
 
 ## 3. Core Flow
 
+The primary v1 interface is a direct-message conversation with Reach. A
+normal DM message is acknowledged and answered in the DM (preferably in a
+thread). `/reach <natural-language request>` is also supported in that DM.
+When `/reach` is invoked elsewhere, the bot responds ephemerally with an
+instruction to DM the app and does not run the old public-channel ranking
+flow.
+
 1. Requester triggers `/reach @X` (optionally with a short note, e.g. `/reach @X urgent - deploy is broken`).
 2. Bot computes a small set of candidate people ("near" X) using the ranking signals below.
 3. Bot replies **ephemerally** (visible only to the requester) with a compact, categorized list of candidates as interactive buttons.
@@ -147,6 +154,9 @@ This is the only "form" in the system — one field, pre-filled, editable. No mu
 - Use type hints for public interfaces and keep Slack API, ranking, and presentation concerns separated into focused modules.
 - Keep secrets, signing tokens, and workspace-specific configuration out of source control. Load them from environment variables or a local, ignored configuration file.
 - Treat Slack user data as sensitive. Request only the scopes required for the feature, preserve the public-channel privacy boundary, and do not log message contents or tokens.
+- Operational logs are timestamped and default to stderr; `LOG_FILE` is an
+  optional local file destination. Never log message contents, credentials,
+  or API keys.
 - Add focused automated tests for ranking, candidate caps, presence buckets, Block Kit payloads, and interaction validation as those components are implemented.
 - Run the relevant formatter, linter, type checker, and tests before completing a change. Do not claim a change is complete when required validation is failing.
 - Update this document and other directly related documentation when implementation decisions change the stated behavior.

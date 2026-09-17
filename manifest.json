@@ -12,8 +12,8 @@
     "slash_commands": [
       {
         "command": "/reach",
-        "description": "Find a small set of people who may help reach a teammate.",
-        "usage_hint": "@person [optional note]",
+        "description": "Ask Reach for help in its direct-message conversation.",
+        "usage_hint": "natural-language request",
         "should_escape": false
       }
     ]
@@ -23,9 +23,7 @@
       "bot": [
         "commands",
         "chat:write",
-        "users:read",
-        "channels:read",
-        "channels:history"
+        "im:history"
       ]
     }
   },
@@ -35,6 +33,9 @@
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
+    "event_subscriptions": {
+      "bot_events": ["message.im"]
+    },
     "token_rotation_enabled": false
   }
 }

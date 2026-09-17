@@ -11,7 +11,10 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk import WebClient
 
 from reach_bot.config import get_settings
+from reach_bot.conversation import ConversationStore
 from reach_bot.handlers import register_handlers
+from reach_bot.logging_config import configure_logging
+from reach_bot.nvidia import NvidiaClient
 from reach_bot.persistence import (
     MemoryRepository,
     PostgresRepository,
@@ -29,7 +32,9 @@ from reach_bot.rendering import render_suggestions
 from reach_bot.slack_provider import SlackSignalProvider
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+configure_logging(settings.log_level, settings.log_file)
+logger = logging.getLogger(__name__)
+logger.info("Reach'em app starting")
 
 
 class EmptySignalProvider:
@@ -91,7 +96,22 @@ def do_rank(target_id: str, requester_id: str) -> RankedCandidates:
     )
 
 
-register_handlers(slack_app, repository=repository, ranker=do_rank, renderer=render_suggestions)
+register_handlers(
+    slack_app,
+    repository=repository,
+    ranker=do_rank,
+    renderer=render_suggestions,
+    assistant=NvidiaClient(
+        settings.nvidia_api_key,
+        base_url=settings.nvidia_base_url,
+        model=settings.nvidia_model,
+        timeout_seconds=settings.nvidia_timeout_seconds,
+    ),
+    conversations=ConversationStore(
+        settings.conversation_max_messages,
+        settings.conversation_max_characters,
+    ),
+)
 
 
 @api.get("/health")
