@@ -63,10 +63,11 @@ if settings.database_url:
     import psycopg
 
     repository = PostgresRepository(psycopg.connect(settings.database_url))
-provider: SignalProvider = SlackSignalProvider(
+slack_provider = SlackSignalProvider(
     WebClient(token=settings.slack_bot_token),
     affinity_source=repository.affinities,
 )
+provider: SignalProvider = slack_provider
 if settings.redis_url:
     import redis
 
@@ -113,6 +114,7 @@ register_handlers(
         settings.conversation_max_messages,
         settings.conversation_max_characters,
     ),
+    target_resolver=slack_provider.resolve_user,
 )
 
 

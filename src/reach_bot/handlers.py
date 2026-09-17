@@ -4,6 +4,7 @@ import ast
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
@@ -14,6 +15,7 @@ from reach_bot.persistence import PingOutcome, ReachRepository
 from reach_bot.rendering import render_ping_modal, render_why
 
 logger = logging.getLogger(__name__)
+SLACK_MENTION = re.compile(r"<@([UW][A-Z0-9]+)>")
 
 
 def is_direct_message_command(command: dict[str, Any]) -> bool:
@@ -21,6 +23,27 @@ def is_direct_message_command(command: dict[str, Any]) -> bool:
     channel_type = str(command.get("channel_type", "")).lower()
     channel_id = str(command.get("channel_id", ""))
     return channel_type == "im" or channel_id.startswith("D")
+
+
+def resolve_reach_target(
+    text: str, resolver: Callable[[str], str] | None
+) -> str | None:
+    if resolver is None:
+        return None
+    mention = SLACK_MENTION.search(text)
+    if mention:
+        return resolver(mention.group(1))
+    marker = re.search(r"(?:reach|contact|find|ping|message)\s+@", text, re.IGNORECASE)
+    if not marker:
+        return None
+    words = re.split(r"\s+", text[marker.end() :].strip(" .,!?"))
+    for length in range(min(len(words), 5), 0, -1):
+        candidate = " ".join(words[:length]).strip(" .,!?")
+        try:
+            return resolver(candidate)
+        except ValueError:
+            continue
+    return None
 
 
 def parse_command(text: str) -> tuple[str, str | None]:
@@ -57,6 +80,7 @@ def register_handlers(
     renderer: Callable[..., list[dict[str, Any]]],
     assistant: NvidiaClient | None = None,
     conversations: ConversationStore | None = None,
+    target_resolver: Callable[[str], str] | None = None,
 ) -> None:
     assistant = assistant or NvidiaClient(None)
     conversations = conversations or ConversationStore()
@@ -71,6 +95,19 @@ def register_handlers(
         request_id: str | None = None,
     ) -> None:
         request_id = request_id or uuid4().hex
+        try:
+            target_id = resolve_reach_target(text, target_resolver)
+        except ValueError:
+            target_id = None
+        if target_id:
+            ranked = ranker(target_id, user_id)
+            await client.chat_postMessage(
+                channel=channel_id,
+                blocks=renderer(target_id, ranked, note=text),
+                text=f"Reach suggestions for <@{target_id}>",
+                **({"thread_ts": thread_ts} if thread_ts else {}),
+            )
+            return
         key = f"{user_id}:{channel_id}"
         conversations.add(key, "user", text)
         try:
