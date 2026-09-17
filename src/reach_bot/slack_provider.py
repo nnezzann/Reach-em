@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from slack_sdk import WebClient
 
@@ -11,8 +11,11 @@ from reach_bot.ranking import Affinity
 class SlackSignalProvider:
     """Public-channel-only Slack API adapter used by the pure ranking engine."""
 
-    def __init__(self, client: WebClient) -> None:
+    def __init__(
+        self, client: WebClient, affinity_source: Any | None = None
+    ) -> None:
         self.client = client
+        self.affinity_source = affinity_source
 
     def public_channels(self, target_id: str) -> list[str]:
         result = self.client.users_conversations(
@@ -69,4 +72,6 @@ class SlackSignalProvider:
         )
 
     def affinities(self, target_id: str) -> dict[str, Affinity]:
-        return {}
+        if self.affinity_source is None:
+            return {}
+        return cast(dict[str, Affinity], self.affinity_source(target_id))
