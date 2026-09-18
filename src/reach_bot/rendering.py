@@ -22,11 +22,7 @@ def _button(
     label = (names or {}).get(candidate.user_id, candidate.user_id)
     return {
         "type": "button",
-        # Slack requires every action_id within a single message to be
-        # unique. Suffixing with the candidate's user_id keeps each button
-        # unique while still routing to the same handler (matched by
-        # prefix regex in handlers.py).
-        "action_id": f"ping_candidate_{candidate.user_id}",
+        "action_id": "ping_candidate",
         "text": {"type": "plain_text", "text": f"Ping {label}"},
         "value": json.dumps(value),
     }
@@ -39,11 +35,8 @@ def render_suggestions(
     ping_ids: dict[str, str] | None = None,
     names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    # This is a section/mrkdwn block (not "header"/plain_text), since
-    # mrkdwn is what lets Slack auto-resolve <@target_id> into a real,
-    # clickable mention with the person's name shown.
     blocks: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Reaching* <@{target_id}>"}}
+        {"type": "header", "text": {"type": "plain_text", "text": f"Reaching <@{target_id}>"}}
     ]
     if note:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": note}]})
