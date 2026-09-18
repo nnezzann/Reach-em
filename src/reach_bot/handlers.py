@@ -72,18 +72,22 @@ def register_handlers(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
     ) -> None:
         """Handle Stage 1 submission (target user selection) and transition to Stage 2."""
-        values = view["state"]["values"]
-        target_id = str(values["target"]["target_user"].get("selected_user", "")).strip()
-        if not target_id:
-            await ack(
-                response_action="errors",
-                errors={"target": "Please select who you are trying to reach."},
-            )
-            return
-        requester_id = str(body["user"]["id"])
-        ranked = await asyncio.to_thread(ranker, target_id, requester_id)
-        stage2_view = render_reach_stage2(target_id, ranked, requester_id=requester_id)
-        await ack(response_action="update", view=stage2_view)
+        try:
+            values = view["state"]["values"]
+            target_id = str(values["target"]["target_user"].get("selected_user", "")).strip()
+            if not target_id:
+                await ack(
+                    response_action="errors",
+                    errors={"target": "Please select who you are trying to reach."},
+                )
+                return
+            requester_id = str(body["user"]["id"])
+            ranked = await asyncio.to_thread(ranker, target_id, requester_id)
+            stage2_view = render_reach_stage2(target_id, ranked, requester_id=requester_id)
+            await ack(response_action="update", view=stage2_view)
+        except Exception as exc:
+            log.exception("reach_stage1_submit error: %s", exc)
+            await ack()
 
     @slack_app.view("reach_submit")  # type: ignore[untyped-decorator]
     async def reach_submit(
