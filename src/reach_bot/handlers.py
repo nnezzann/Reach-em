@@ -65,27 +65,29 @@ def register_handlers(
             log.exception("/reach unhandled error for user=%s", command.get("user_id"))
             await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
 
-    @slack_app.action("target_user")  # type: ignore[untyped-decorator]
-    async def target_selected(
-        ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
+    @slack_app.view("reach_stage1_submit")  # type: ignore[untyped-decorator]
+    async def reach_stage1_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
     ) -> None:
-        await ack()
-        target_id = str(body.get("actions", [{}])[0].get("selected_user", "")).strip()
+        """Handle Stage 1 submission (target user selection) and transition to Stage 2."""
+        values = view["state"]["values"]
+        target_id = str(values["target"]["target_user"].get("selected_user", "")).strip()
         if not target_id:
-            log.warning("target_user action did not include a selected user")
+            await ack(
+                response_action="errors",
+                errors={"target": "Please select who you are trying to reach."},
+            )
             return
         requester_id = str(body["user"]["id"])
         ranked = await asyncio.to_thread(ranker, target_id, requester_id)
-        await client.views_update(
-            view_id=body["view"]["id"],
-            hash=body["view"].get("hash"),
-            view=render_reach_stage2(target_id, ranked, requester_id=requester_id),
-        )
+        stage2_view = render_reach_stage2(target_id, ranked, requester_id=requester_id)
+        await ack(response_action="update", view=stage2_view)
 
     @slack_app.view("reach_submit")  # type: ignore[untyped-decorator]
     async def reach_submit(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
     ) -> None:
+        """Handle Stage 2 submission (final message to selected candidates)."""
         values = view["state"]["values"]
         metadata = json.loads(view.get("private_metadata", "{}"))
         target_id = str(metadata.get("target_id", "")).strip()

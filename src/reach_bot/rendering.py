@@ -11,8 +11,9 @@ DEFAULT_MESSAGE = "Do you know where they are or how to reach them?"
 def render_reach_stage1() -> dict[str, Any]:
     return {
         "type": "modal",
-        "callback_id": "reach_stage1",
+        "callback_id": "reach_stage1_submit",
         "title": {"type": "plain_text", "text": "Reach someone"},
+        "submit": {"type": "plain_text", "text": "Next"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
             {
@@ -23,7 +24,6 @@ def render_reach_stage1() -> dict[str, Any]:
                     "type": "users_select",
                     "action_id": "target_user",
                     "placeholder": {"type": "plain_text", "text": "Select a person"},
-                    "dispatch_action": True,
                 },
             }
         ],

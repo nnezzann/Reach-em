@@ -82,7 +82,7 @@ def test_bare_reach_command_opens_initial_modal() -> None:
     assert acknowledgements == [{}]
     assert responses == []
     assert client.opened[0]["trigger_id"] == "trigger"
-    assert client.opened[0]["view"]["callback_id"] == "reach_stage1"
+    assert client.opened[0]["view"]["callback_id"] == "reach_stage1_submit"
     assert client.opened[0]["view"]["blocks"][0]["element"]["action_id"] == "target_user"
 
 
@@ -95,16 +95,28 @@ def test_target_selection_resolves_target_before_stage_two() -> None:
 
     app, client = _register(ranker=ranker)
 
-    async def ack(**_kwargs: Any) -> None:
-        return None
+    async def ack(**kwargs: Any) -> None:
+        # Simulate the response_action="update" ack
+        if kwargs.get("response_action") == "update":
+            client.updated.append({"view": kwargs.get("view")})
 
     asyncio.run(
-        app.handlers["target_user"](
+        app.handlers["reach_stage1_submit"](
             ack=ack,
             body={
-                "actions": [{"selected_user": "U-target"}],
                 "user": {"id": "U-requester"},
                 "view": {"id": "V1", "hash": "H1"},
+            },
+            view={
+                "state": {
+                    "values": {
+                        "target": {
+                            "target_user": {
+                                "selected_user": "U-target"
+                            }
+                        }
+                    }
+                }
             },
             client=client,
         )
