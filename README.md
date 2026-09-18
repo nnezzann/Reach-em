@@ -1,6 +1,6 @@
 # Reach'em
 
-Reach'em is a conversational Slack assistant available in a direct message. Send it a normal DM or use `/reach <request>` in that DM; responses stay in the DM thread. The older public-channel candidate ranking components remain available for compatibility, but `/reach` outside a DM only explains how to use the assistant and never ranks or posts in a channel.
+Reach'em is a Slack bot that helps a requester reach the smallest useful audience when a teammate is unavailable. It suggests a short, ranked list from **public-channel** signals and only sends a direct message after the requester explicitly chooses and confirms a recipient.
 
 ## Development
 
@@ -8,23 +8,36 @@ Python 3.12+, `uv`, PostgreSQL 15+, and Redis are supported. Copy `.env.example`
 
 ```bash
 uv sync --extra dev
-uv run uvicorn reach_bot.app:api --reload
+cp .env.example .env
+```
+
+For local development, enable Socket Mode in the Slack app and set both tokens in
+`.env`: `SLACK_BOT_TOKEN` is the bot token (`xoxb-...`) and `SLACK_APP_TOKEN` is
+the app-level Socket Mode token (`xapp-...`). The checked-in `manifest.json` has
+`socket_mode_enabled` set to `true`; apply it to the Slack app before running.
+Then start the bot with:
+
+```bash
+uv run python app.py
+```
+
+The process stays connected through `AsyncSocketModeHandler`; no public URL or
+`SLACK_SIGNING_SECRET` is needed for Socket Mode. Keep `.env` local and never
+commit real tokens.
+
+The FastAPI `/slack/events` endpoint remains available for deployments that
+explicitly omit `SLACK_APP_TOKEN` and run `uv run uvicorn reach_bot.app:api
+--host 0.0.0.0 --port 8000`. In that HTTP mode, configure Slack request URLs
+for `/slack/events` and set `SLACK_SIGNING_SECRET`.
+
+The ranking engine keeps presence, inverse public-channel size, and optional recent thread co-occurrence as separate evidence. Affinity is only a capped boost after the configured sample threshold; each presence bucket is capped by `MAX_PER_BUCKET`. PostgreSQL migrations are in `src/reach_bot/migrations/`. Redis stores only short-TTL `presence:{user_id}` values.
+
+Run checks with:
+
+```bash
 uv run ruff check .
 uv run mypy src
 uv run pytest
 ```
-
-The NVIDIA-compatible API uses `NVIDIA_API_KEY`, with configurable `NVIDIA_BASE_URL` and `NVIDIA_MODEL`. Logs are timestamped and written to stderr by default; set `LOG_FILE` to also write a local log file (parent directories are created as needed). Logs contain operational metadata only, never API keys or message contents.
-
-For real-time local Slack CLI testing, use a slash-safe copy path because the repository name contains an apostrophe:
-
-```bash
-rm -rf /tmp/reach-em-live
-cp -a "$PWD" /tmp/reach-em-live
-cd /tmp/reach-em-live
-uv run slack run
-```
-
-The ranking engine keeps presence, inverse public-channel size, and optional recent thread co-occurrence as separate evidence. Affinity is only a capped boost after the configured sample threshold; each presence bucket is capped by `MAX_PER_BUCKET`. PostgreSQL migrations are in `src/reach_bot/migrations/`. Redis stores only short-TTL `presence:{user_id}` values.
 
 All suggestions are ephemeral. The bot never posts to public channels, reads private channels or DMs, or displays affinity as a leaderboard.

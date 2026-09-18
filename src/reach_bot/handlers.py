@@ -7,52 +7,28 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
-from uuid import uuid4
 
-from reach_bot.conversation import ConversationStore
-from reach_bot.nvidia import NvidiaClient, NvidiaClientError
+from slack_sdk.errors import SlackApiError
+
+log = logging.getLogger(__name__)
+
 from reach_bot.persistence import PingOutcome, ReachRepository
 from reach_bot.rendering import render_ping_modal, render_why
-
-logger = logging.getLogger(__name__)
-SLACK_MENTION = re.compile(r"<@([UW][A-Z0-9]+)>")
-
-
-def is_direct_message_command(command: dict[str, Any]) -> bool:
-    """Accept Slack DM payloads even when channel_type is omitted."""
-    channel_type = str(command.get("channel_type", "")).lower()
-    channel_id = str(command.get("channel_id", ""))
-    return channel_type == "im" or channel_id.startswith("D")
-
-
-def resolve_reach_target(
-    text: str, resolver: Callable[[str], str] | None
-) -> str | None:
-    if resolver is None:
-        return None
-    mention = SLACK_MENTION.search(text)
-    if mention:
-        return resolver(mention.group(1))
-    marker = re.search(r"(?:reach|contact|find|ping|message)\s+@", text, re.IGNORECASE)
-    if not marker:
-        return None
-    words = re.split(r"\s+", text[marker.end() :].strip(" .,!?"))
-    for length in range(min(len(words), 5), 0, -1):
-        candidate = " ".join(words[:length]).strip(" .,!?")
-        try:
-            return resolver(candidate)
-        except ValueError:
-            continue
-    return None
 
 
 def parse_command(text: str) -> tuple[str, str | None]:
     parts = text.strip().split(maxsplit=1)
     if not parts:
         raise ValueError("A target user is required")
-    target = parts[0].strip().strip("<@>")
+    # Handle both raw @username and Slack's encoded <@U123ABC> / <@U123ABC|name> formats
+    raw = parts[0].strip()
+    if raw.startswith("<@") and raw.endswith(">"):
+        inner = raw[2:-1]  # strip <@ and >
+        target = inner.split("|")[0]  # U123ABC|name -> U123ABC
+    else:
+        target = raw.lstrip("@")
     if not target or not target.replace("-", "").isalnum():
-        raise ValueError("Invalid target user")
+        raise ValueError(f"Could not parse a valid user from: {raw!r}")
     return target, parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
 
 
@@ -78,98 +54,7 @@ def register_handlers(
     repository: ReachRepository,
     ranker: Callable[..., Any],
     renderer: Callable[..., list[dict[str, Any]]],
-    assistant: NvidiaClient | None = None,
-    conversations: ConversationStore | None = None,
-    target_resolver: Callable[[str], str] | None = None,
 ) -> None:
-    assistant = assistant or NvidiaClient(None)
-    conversations = conversations or ConversationStore()
-
-    async def answer_in_dm(
-        *,
-        user_id: str,
-        channel_id: str,
-        text: str,
-        client: Any,
-        thread_ts: str | None = None,
-        request_id: str | None = None,
-    ) -> None:
-        request_id = request_id or uuid4().hex
-        try:
-            target_id = resolve_reach_target(text, target_resolver)
-        except ValueError:
-            target_id = None
-        if target_id:
-            ranked = ranker(target_id, user_id)
-            await client.chat_postMessage(
-                channel=channel_id,
-                blocks=renderer(target_id, ranked, note=text),
-                text=f"Reach suggestions for <@{target_id}>",
-                **({"thread_ts": thread_ts} if thread_ts else {}),
-            )
-            return
-        key = f"{user_id}:{channel_id}"
-        conversations.add(key, "user", text)
-        try:
-            response = await assistant.complete(
-                [
-                    {"role": message.role, "content": message.content}
-                    for message in conversations.get(key)
-                ]
-            )
-        except NvidiaClientError as exc:
-            logger.warning(
-                "assistant response failed request_id=%s category=%s",
-                request_id,
-                type(exc).__name__,
-            )
-            await client.chat_postMessage(
-                channel=channel_id,
-                text=str(exc),
-                **({"thread_ts": thread_ts} if thread_ts else {}),
-            )
-            return
-        conversations.add(key, "assistant", response)
-        try:
-            await client.chat_postMessage(
-                channel=channel_id,
-                text=response,
-                **({"thread_ts": thread_ts} if thread_ts else {}),
-            )
-        except Exception:
-            logger.exception("Slack reply failed request_id=%s", request_id)
-            raise
-
-    async def safe_answer(**kwargs: Any) -> None:
-        try:
-            await answer_in_dm(**kwargs)
-        except Exception:
-            logger.exception("DM assistant handler failed")
-
-    @slack_app.event("message")  # type: ignore[untyped-decorator]
-    async def dm_message(event: dict[str, Any], client: Any) -> None:
-        if (
-            event.get("subtype")
-            or event.get("bot_id")
-            or not event.get("user")
-            or event.get("channel_type") != "im"
-            or not str(event.get("text", "")).strip()
-        ):
-            return
-        logger.info("DM message received channel_type=%s", event.get("channel_type"))
-        request_id = uuid4().hex
-        logger.info("DM assistant request started request_id=%s", request_id)
-        asyncio.create_task(
-            safe_answer(
-                user_id=str(event["user"]),
-                channel_id=str(event["channel"]),
-                text=str(event["text"]).strip(),
-                client=client,
-                thread_ts=str(event.get("thread_ts") or event.get("ts") or "") or None,
-                request_id=request_id,
-            )
-        )
-
     @slack_app.command("/reach")  # type: ignore[untyped-decorator]
     async def reach_command(
         ack: Callable[..., Awaitable[None]],
@@ -177,45 +62,42 @@ def register_handlers(
         respond: Callable[..., Awaitable[None]],
         client: Any,
     ) -> None:
+        await ack()
         try:
-            await ack()
-        except Exception:
-            logger.exception("Slack slash command acknowledgement failed")
-            raise
-        text = str(command.get("text", "")).strip()
-        request_id = uuid4().hex
-        logger.info(
-            "slash command received request_id=%s channel_type=%s",
-            request_id,
-            command.get("channel_type"),
-        )
-        if not is_direct_message_command(command):
+            target, note = parse_command(command.get("text", ""))
+            ranked = await asyncio.to_thread(ranker, target, command["user_id"])
+            shown = (*ranked.active, *ranked.offline)
+            ping_ids = {
+                candidate.user_id: repository.create_ping(
+                    command["user_id"],
+                    target,
+                    candidate.user_id,
+                    candidate.evidence[0] if candidate.evidence else None,
+                    candidate.presence,
+                ).id
+                for candidate in shown
+            }
+            # Button text only supports plain_text, which Slack never
+            # resolves <@Uxxxx> mentions inside (unlike section/mrkdwn
+            # blocks, where mentions render as real names automatically).
+            # Resolve each candidate's display name up front so button
+            # labels read as "Ping Hashim" instead of "Ping <@U0C1...>".
+            names = await _resolve_names(client, {c.user_id for c in shown})
             await respond(
                 response_type="ephemeral",
-                text=(
-                    "Please open Reach's Messages tab and use `/reach` there. "
-                    "Slack slash commands cannot be used inside assistant threads."
-                ),
+                blocks=renderer(target, ranked, note, ping_ids, names),
             )
-            return
-        if not text:
-            await client.chat_postMessage(
-                channel=command["channel_id"],
-                text=(
-                    "Tell me what you need help with, for example: "
-                    "`/reach find the deploy owner`."
-                ),
-            )
-            return
-        await answer_in_dm(
-            user_id=str(command["user_id"]),
-            channel_id=str(command["channel_id"]),
-            text=text,
-            client=client,
-            request_id=request_id,
-        )
+        except ValueError as exc:
+            log.warning("/reach parse error: %s", exc)
+            await respond(response_type="ephemeral", text=str(exc))
+        except SlackApiError as exc:
+            log.error("/reach Slack API error: %s", exc)
+            await respond(response_type="ephemeral", text=f"Slack API error: {exc.response['error']}")
+        except Exception as exc:
+            log.exception("/reach unhandled error for user=%s", command.get("user_id"))
+            await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
 
-    @slack_app.action("ping_candidate")  # type: ignore[untyped-decorator]
+    @slack_app.action(re.compile(r"^ping_candidate_"))  # type: ignore[untyped-decorator]
     async def ping_candidate(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
     ) -> None:
@@ -236,8 +118,12 @@ def register_handlers(
     ) -> None:
         await ack()
         target_id = str(body["actions"][0]["value"])
-        ranked = ranker(target_id, str(body["user"]["id"]))
-        await respond(response_type="ephemeral", replace_original=False, blocks=render_why(ranked))
+        try:
+            ranked = await asyncio.to_thread(ranker, target_id, str(body["user"]["id"]))
+            await respond(response_type="ephemeral", replace_original=False, blocks=render_why(ranked))
+        except Exception as exc:
+            log.exception("why_these_people error for target=%s", target_id)
+            await respond(response_type="ephemeral", replace_original=False, text=f"Something went wrong: {exc}")
 
     @slack_app.view("ping_submit")  # type: ignore[untyped-decorator]
     async def ping_submit(
@@ -288,3 +174,28 @@ async def _record_outcome(body: dict[str, Any], repository: ReachRepository, out
     value = decode_action_value(action.get("value", "{}"))
     if "ping_id" in value:
         repository.record_outcome(PingOutcome(value["ping_id"], outcome))
+
+
+async def _resolve_names(client: Any, user_ids: set[str]) -> dict[str, str]:
+    """Look up display names for a small set of user IDs, concurrently.
+
+    Falls back to the raw ID (so button text still renders something
+    sensible) if a lookup fails for any reason.
+    """
+
+    async def _one(user_id: str) -> tuple[str, str]:
+        try:
+            info = await client.users_info(user=user_id)
+            profile = info.get("user", {}).get("profile", {})
+            name = (
+                profile.get("display_name")
+                or info.get("user", {}).get("real_name")
+                or info.get("user", {}).get("name")
+                or user_id
+            )
+            return user_id, str(name)
+        except SlackApiError:
+            return user_id, user_id
+
+    results = await asyncio.gather(*(_one(uid) for uid in user_ids))
+    return dict(results)

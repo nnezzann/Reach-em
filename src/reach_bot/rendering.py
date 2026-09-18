@@ -6,14 +6,28 @@ from typing import Any
 from reach_bot.ranking import Candidate, RankedCandidates
 
 
-def _button(candidate: Candidate, target_id: str, ping_id: str | None) -> dict[str, Any]:
+def _button(
+    candidate: Candidate,
+    target_id: str,
+    ping_id: str | None,
+    names: dict[str, str] | None,
+) -> dict[str, Any]:
     value = {"candidate_id": candidate.user_id, "target_id": target_id}
     if ping_id:
         value["ping_id"] = ping_id
+    # Button text only supports plain_text, which Slack never resolves
+    # <@Uxxxx> mention syntax inside -- it shows the literal characters.
+    # Use the resolved display name when we have one, falling back to the
+    # raw ID only if the lookup failed for some reason.
+    label = (names or {}).get(candidate.user_id, candidate.user_id)
     return {
         "type": "button",
-        "action_id": "ping_candidate",
-        "text": {"type": "plain_text", "text": f"Ping <@{candidate.user_id}>"},
+        # Slack requires every action_id within a single message to be
+        # unique. Suffixing with the candidate's user_id keeps each button
+        # unique while still routing to the same handler (matched by
+        # prefix regex in handlers.py).
+        "action_id": f"ping_candidate_{candidate.user_id}",
+        "text": {"type": "plain_text", "text": f"Ping {label}"},
         "value": json.dumps(value),
     }
 
@@ -23,9 +37,13 @@ def render_suggestions(
     ranked: RankedCandidates,
     note: str | None = None,
     ping_ids: dict[str, str] | None = None,
+    names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    # This is a section/mrkdwn block (not "header"/plain_text), since
+    # mrkdwn is what lets Slack auto-resolve <@target_id> into a real,
+    # clickable mention with the person's name shown.
     blocks: list[dict[str, Any]] = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"Reaching <@{target_id}>"}}
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Reaching* <@{target_id}>"}}
     ]
     if note:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": note}]})
@@ -40,7 +58,7 @@ def render_suggestions(
                 {
                     "type": "actions",
                     "elements": [
-                        _button(c, target_id, ping_ids.get(c.user_id) if ping_ids else None)
+                        _button(c, target_id, ping_ids.get(c.user_id) if ping_ids else None, names)
                         for c in candidates
                     ],
                 }
@@ -52,7 +70,7 @@ def render_suggestions(
                 {
                     "type": "button",
                     "action_id": "why_these_people",
-                    "text": {"type": "plain_text", "text": "ⓘ Why these people"},
+                    "text": {"type": "plain_text", "text": "\u24d8 Why these people"},
                     "value": target_id,
                 }
             ],
@@ -64,7 +82,7 @@ def render_suggestions(
 def render_ping_modal(
     candidate_id: str, target_id: str, note: str | None = None, ping_id: str = ""
 ) -> dict[str, Any]:
-    text = note or f"Hey, trying to reach <@{target_id}> — do you know if they're around?"
+    text = note or f"Hey, trying to reach <@{target_id}> \u2014 do you know if they're around?"
     return {
         "type": "modal",
         "callback_id": "ping_submit",
@@ -98,7 +116,7 @@ def render_why(ranked: RankedCandidates) -> list[dict[str, Any]]:
         if candidate.thread_recency:
             evidence.append(f"recent-thread signal {candidate.thread_recency:.3f}")
         details = ", ".join(evidence) or "public signal"
-        lines.append(f"<@{candidate.user_id}> — {presence} · {details}")
+        lines.append(f"<@{candidate.user_id}> \u2014 {presence} \u00b7 {details}")
     return [
         {"type": "header", "text": {"type": "plain_text", "text": "Why these people"}},
         {
