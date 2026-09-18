@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
+import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from slack_sdk.errors import SlackApiError
+
+log = logging.getLogger(__name__)
 
 from reach_bot.persistence import PingOutcome, ReachRepository
 from reach_bot.rendering import render_ping_modal, render_why
@@ -15,9 +20,15 @@ def parse_command(text: str) -> tuple[str, str | None]:
     parts = text.strip().split(maxsplit=1)
     if not parts:
         raise ValueError("A target user is required")
-    target = parts[0].strip().strip("<@>")
+    # Handle both raw @username and Slack's encoded <@U123ABC> / <@U123ABC|name> formats
+    raw = parts[0].strip()
+    if raw.startswith("<@") and raw.endswith(">"):
+        inner = raw[2:-1]  # strip <@ and >
+        target = inner.split("|")[0]  # U123ABC|name -> U123ABC
+    else:
+        target = raw.lstrip("@")
     if not target or not target.replace("-", "").isalnum():
-        raise ValueError("Invalid target user")
+        raise ValueError(f"Could not parse a valid user from: {raw!r}")
     return target, parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
 
 
@@ -49,11 +60,12 @@ def register_handlers(
         ack: Callable[..., Awaitable[None]],
         command: dict[str, Any],
         respond: Callable[..., Awaitable[None]],
+        client: Any,
     ) -> None:
         await ack()
         try:
             target, note = parse_command(command.get("text", ""))
-            ranked = ranker(target, command["user_id"])
+            ranked = await asyncio.to_thread(ranker, target, command["user_id"])
             shown = (*ranked.active, *ranked.offline)
             ping_ids = {
                 candidate.user_id: repository.create_ping(
@@ -65,15 +77,27 @@ def register_handlers(
                 ).id
                 for candidate in shown
             }
+            # Button text only supports plain_text, which Slack never
+            # resolves <@Uxxxx> mentions inside (unlike section/mrkdwn
+            # blocks, where mentions render as real names automatically).
+            # Resolve each candidate's display name up front so button
+            # labels read as "Ping Hashim" instead of "Ping <@U0C1...>".
+            names = await _resolve_names(client, {c.user_id for c in shown})
             await respond(
                 response_type="ephemeral",
-                blocks=renderer(target, ranked, note, ping_ids),
+                blocks=renderer(target, ranked, note, ping_ids, names),
             )
-        except (ValueError, SlackApiError) as exc:
-            message = str(exc) if isinstance(exc, ValueError) else "Slack could not find that user."
-            await respond(response_type="ephemeral", text=message)
+        except ValueError as exc:
+            log.warning("/reach parse error: %s", exc)
+            await respond(response_type="ephemeral", text=str(exc))
+        except SlackApiError as exc:
+            log.error("/reach Slack API error: %s", exc)
+            await respond(response_type="ephemeral", text=f"Slack API error: {exc.response['error']}")
+        except Exception as exc:
+            log.exception("/reach unhandled error for user=%s", command.get("user_id"))
+            await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
 
-    @slack_app.action("ping_candidate")  # type: ignore[untyped-decorator]
+    @slack_app.action(re.compile(r"^ping_candidate_"))  # type: ignore[untyped-decorator]
     async def ping_candidate(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
     ) -> None:
@@ -94,8 +118,12 @@ def register_handlers(
     ) -> None:
         await ack()
         target_id = str(body["actions"][0]["value"])
-        ranked = ranker(target_id, str(body["user"]["id"]))
-        await respond(response_type="ephemeral", replace_original=False, blocks=render_why(ranked))
+        try:
+            ranked = await asyncio.to_thread(ranker, target_id, str(body["user"]["id"]))
+            await respond(response_type="ephemeral", replace_original=False, blocks=render_why(ranked))
+        except Exception as exc:
+            log.exception("why_these_people error for target=%s", target_id)
+            await respond(response_type="ephemeral", replace_original=False, text=f"Something went wrong: {exc}")
 
     @slack_app.view("ping_submit")  # type: ignore[untyped-decorator]
     async def ping_submit(
@@ -146,3 +174,28 @@ async def _record_outcome(body: dict[str, Any], repository: ReachRepository, out
     value = decode_action_value(action.get("value", "{}"))
     if "ping_id" in value:
         repository.record_outcome(PingOutcome(value["ping_id"], outcome))
+
+
+async def _resolve_names(client: Any, user_ids: set[str]) -> dict[str, str]:
+    """Look up display names for a small set of user IDs, concurrently.
+
+    Falls back to the raw ID (so button text still renders something
+    sensible) if a lookup fails for any reason.
+    """
+
+    async def _one(user_id: str) -> tuple[str, str]:
+        try:
+            info = await client.users_info(user=user_id)
+            profile = info.get("user", {}).get("profile", {})
+            name = (
+                profile.get("display_name")
+                or info.get("user", {}).get("real_name")
+                or info.get("user", {}).get("name")
+                or user_id
+            )
+            return user_id, str(name)
+        except SlackApiError:
+            return user_id, user_id
+
+    results = await asyncio.gather(*(_one(uid) for uid in user_ids))
+    return dict(results)

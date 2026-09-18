@@ -5,15 +5,20 @@
     "background_color": "#1d1c1d"
   },
   "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
     "bot_user": {
-      "display_name": "Reach",
-      "always_online": false
+      "display_name": "Reach'em",
+      "always_online": true
     },
     "slash_commands": [
       {
         "command": "/reach",
-        "description": "Find a small set of people who may help reach a teammate.",
-        "usage_hint": "@person [optional note]",
+        "description": "Find the right people to reach when a teammate is unavailable.",
+        "usage_hint": "@username [optional note]",
         "should_escape": false
       }
     ]
@@ -23,11 +28,13 @@
       "bot": [
         "commands",
         "chat:write",
-        "users:read",
         "channels:read",
-        "channels:history"
+        "users:read",
+        "im:write",
+        "im:history"
       ]
-    }
+    },
+    "pkce_enabled": false
   },
   "settings": {
     "interactivity": {
@@ -35,6 +42,8 @@
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
-    "token_rotation_enabled": false
+    "token_rotation_enabled": false,
+    "app_level_token_rotation_enabled": false,
+    "is_mcp_enabled": false
   }
 }
