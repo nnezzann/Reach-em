@@ -55,6 +55,8 @@ def rank_candidates(
     min_sample_threshold: int = 3,
     thread_recency_days: int = 7,
     include_threads: bool = True,
+    include_affinity: bool = True,
+    max_candidates: int | None = None,
 ) -> RankedCandidates:
     """Generate and rank public-channel candidates without side effects."""
     channels = provider.public_channels(target_id)
@@ -77,7 +79,7 @@ def rank_candidates(
         if include_threads
         else {}
     )
-    affinities = provider.affinities(target_id)
+    affinities = provider.affinities(target_id) if include_affinity else {}
     candidates: list[Candidate] = []
     for user_id in set(proximity) | set(recency):
         affinity = affinities.get(user_id)
@@ -113,6 +115,10 @@ def rank_candidates(
             :max_per_bucket
         ]
     )
+    if max_candidates is not None:
+        active_count = min(len(active), max_candidates)
+        active = active[:active_count]
+        offline = offline[: max(0, max_candidates - active_count)]
     return RankedCandidates(active, offline)
 
 

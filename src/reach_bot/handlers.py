@@ -11,7 +11,13 @@ from typing import Any
 from slack_sdk.errors import SlackApiError
 
 from reach_bot.persistence import PingOutcome, ReachRepository
-from reach_bot.rendering import render_ping_modal, render_why
+from reach_bot.rendering import (
+    render_ping_modal,
+    render_reach_stage1,
+    render_reach_stage2,
+    render_reply_modal,
+    render_why,
+)
 
 log = logging.getLogger(__name__)
 
@@ -64,29 +70,7 @@ def register_handlers(
     ) -> None:
         await ack()
         try:
-            target, note = parse_command(command.get("text", ""))
-            ranked = await asyncio.to_thread(ranker, target, command["user_id"])
-            shown = (*ranked.active, *ranked.offline)
-            ping_ids = {
-                candidate.user_id: repository.create_ping(
-                    command["user_id"],
-                    target,
-                    candidate.user_id,
-                    candidate.evidence[0] if candidate.evidence else None,
-                    candidate.presence,
-                ).id
-                for candidate in shown
-            }
-            # Button text only supports plain_text, which Slack never
-            # resolves <@Uxxxx> mentions inside (unlike section/mrkdwn
-            # blocks, where mentions render as real names automatically).
-            # Resolve each candidate's display name up front so button
-            # labels read as "Ping Hashim" instead of "Ping <@U0C1...>".
-            names = await _resolve_names(client, {c.user_id for c in shown})
-            await respond(
-                response_type="ephemeral",
-                blocks=renderer(target, ranked, note, ping_ids, names),
-            )
+            await client.views_open(trigger_id=command["trigger_id"], view=render_reach_stage1())
         except ValueError as exc:
             log.warning("/reach parse error: %s", exc)
             await respond(response_type="ephemeral", text=str(exc))
@@ -98,6 +82,80 @@ def register_handlers(
         except Exception as exc:
             log.exception("/reach unhandled error for user=%s", command.get("user_id"))
             await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
+
+    @slack_app.action("target_user")  # type: ignore[untyped-decorator]
+    async def target_selected(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
+    ) -> None:
+        await ack()
+        target_id = str(body["actions"][0]["selected_user"])
+        requester_id = str(body["user"]["id"])
+        ranked = await asyncio.to_thread(ranker, target_id, requester_id)
+        await client.views_update(
+            view_id=body["view"]["id"],
+            hash=body["view"].get("hash"),
+            view=render_reach_stage2(target_id, ranked, requester_id=requester_id),
+        )
+
+    @slack_app.view("reach_submit")  # type: ignore[untyped-decorator]
+    async def reach_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+    ) -> None:
+        values = view["state"]["values"]
+        metadata = json.loads(view.get("private_metadata", "{}"))
+        target_id = str(metadata["target_id"])
+        requester_id = str(body["user"]["id"])
+        suggested: list[str] = []
+        for block in values.values():
+            element = next(iter(block.values()))
+            suggested.extend(str(option["value"]) for option in element.get("selected_options", []))
+        manual = values.get("manual_candidates", {}).get("manual_candidates", {})
+        recipients = list(dict.fromkeys((*suggested, *manual.get("selected_users", []))))
+        recipients = [user_id for user_id in recipients if user_id not in {target_id, requester_id}]
+        if not recipients:
+            await ack(
+                response_action="errors",
+                errors={"manual_candidates": "Select at least one recipient."},
+            )
+            return
+        await ack()
+        message = str(values["message"]["message"]["message_input"].get("value", "")).strip()
+        request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
+        ranked = await asyncio.to_thread(ranker, target_id, requester_id)
+        by_id = {candidate.user_id: candidate for candidate in (*ranked.active, *ranked.offline)}
+        for candidate_id in recipients:
+            candidate = by_id.get(candidate_id)
+            ping = await asyncio.to_thread(
+                repository.create_ping,
+                request.id,
+                requester_id,
+                target_id,
+                candidate_id,
+                candidate.evidence[0] if candidate and candidate.evidence else None,
+                candidate.presence if candidate else "offline",
+            )
+            await client.chat_postMessage(
+                channel=candidate_id,
+                text=f"Reach, relaying for <@{requester_id}>:\n{message}",
+                blocks=[
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "action_id": action_id,
+                                "text": {"type": "plain_text", "text": label},
+                                "value": json.dumps({"ping_id": ping.id}),
+                            }
+                            for action_id, label in (
+                                ("outcome_helped", "✅ I know"),
+                                ("outcome_unknown", "❌ Don't know"),
+                                ("outcome_more", "💬 Reply with more"),
+                            )
+                        ],
+                    }
+                ],
+            )
 
     @slack_app.action(re.compile(r"^ping_candidate(?:_|$)"))  # type: ignore[untyped-decorator]
     async def ping_candidate(
@@ -165,7 +223,6 @@ def register_handlers(
 
     for action, outcome in (
         ("outcome_helped", "helped"),
-        ("outcome_relayed", "relayed"),
         ("outcome_unknown", "unknown"),
     ):
 
@@ -175,6 +232,34 @@ def register_handlers(
         ) -> None:
             await ack()
             await _record_outcome(body, repository, _outcome)
+
+    @slack_app.action("outcome_more")  # type: ignore[untyped-decorator]
+    async def outcome_more(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
+    ) -> None:
+        await ack()
+        value = decode_action_value(body["actions"][0].get("value", "{}"))
+        await client.views_open(
+            trigger_id=body["trigger_id"],
+            view=render_reply_modal(value["ping_id"]),
+        )
+
+    @slack_app.view("reply_more_submit")  # type: ignore[untyped-decorator]
+    async def reply_more_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+    ) -> None:
+        await ack()
+        ping_id = str(view["private_metadata"])
+        reply = str(view["state"]["values"]["reply"]["reply_input"].get("value", "")).strip()
+        ping = repository.get_ping(ping_id)
+        if ping is None:
+            log.warning("reply_more received unknown ping_id=%s", ping_id)
+            return
+        repository.record_outcome(PingOutcome(ping_id, "replied"))
+        await client.chat_postMessage(
+            channel=ping.requester_id,
+            text=f"Reply from Reach recipient:\n{reply}",
+        )
 
 
 async def _record_outcome(body: dict[str, Any], repository: ReachRepository, outcome: str) -> None:

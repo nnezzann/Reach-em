@@ -88,6 +88,8 @@ def do_rank(target_id: str, requester_id: str) -> RankedCandidates:
         min_sample_threshold=settings.min_sample_threshold,
         thread_recency_days=settings.thread_recency_days,
         include_threads=settings.include_thread_signal,
+        include_affinity=settings.include_affinity,
+        max_candidates=settings.max_suggested_candidates,
     )
 
 

@@ -1,4 +1,3 @@
-
 from reach_bot.ranking import Affinity, rank_candidates
 
 
@@ -35,3 +34,13 @@ def test_rank_caps_bucket():
 
     result = rank_candidates("target", "requester", Many(), max_per_bucket=2)
     assert len(result.active) == 2
+
+
+def test_rank_can_cap_total_suggestions():
+    class Mixed(Fake):
+        def presence(self, user_id):
+            return "active" if user_id == "a" else "offline"
+
+    result = rank_candidates("target", "requester", Mixed(), max_per_bucket=3, max_candidates=1)
+
+    assert len(result.active) + len(result.offline) == 1

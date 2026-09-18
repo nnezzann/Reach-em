@@ -1,11 +1,16 @@
-CREATE TABLE IF NOT EXISTS pings (
+CREATE TABLE IF NOT EXISTS reach_requests (
     id UUID PRIMARY KEY, requester_id TEXT NOT NULL, target_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS pings (
+    id UUID PRIMARY KEY, reach_request_id UUID NOT NULL REFERENCES reach_requests(id) ON DELETE CASCADE,
+    requester_id TEXT NOT NULL, target_id TEXT NOT NULL,
     candidate_id TEXT NOT NULL, channel_context TEXT, presence_at_ping TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS ping_outcomes (
     id UUID PRIMARY KEY, ping_id UUID NOT NULL UNIQUE REFERENCES pings(id) ON DELETE CASCADE,
-    outcome TEXT NOT NULL CHECK (outcome IN ('helped','relayed','no_response','unknown','wrong_person')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('helped','replied','relayed','no_response','unknown','wrong_person')),
     responded_at TIMESTAMPTZ, response_latency_seconds INTEGER
 );
 CREATE TABLE IF NOT EXISTS affinity_scores (
