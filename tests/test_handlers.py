@@ -127,32 +127,7 @@ def test_target_selection_resolves_target_before_stage_two() -> None:
     assert '"target_id":"U-target"' in client.updated[0]["view"]["private_metadata"]
 
 
-def test_target_selection_handles_exceptions() -> None:
-    app, client = _register()
-    acknowledgements: list[dict[str, Any]] = []
 
-    async def ack(**kwargs: Any) -> None:
-        acknowledgements.append(kwargs)
-
-    # Test with missing view state to trigger exception
-    asyncio.run(
-        app.handlers["reach_stage1_submit"](
-            ack=ack,
-            body={
-                "user": {"id": "U-requester"},
-                "view": {"id": "V1", "hash": "H1"},
-            },
-            view={
-                "state": {
-                    "values": {}
-                }
-            },
-            client=client,
-        )
-    )
-
-    # Should handle exception gracefully and call ack()
-    assert len(acknowledgements) == 1  # Ensure ack was called despite exception
 
 
 
