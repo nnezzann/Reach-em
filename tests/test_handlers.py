@@ -79,11 +79,11 @@ def test_bare_reach_command_opens_initial_modal() -> None:
         )
     )
 
-    assert acknowledgements == [{}]
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0]["trigger_id"] == "trigger"
+    assert acknowledgements[0]["view"]["callback_id"] == "reach_stage1_submit"
+    assert acknowledgements[0]["view"]["blocks"][0]["element"]["action_id"] == "target_user"
     assert responses == []
-    assert client.opened[0]["trigger_id"] == "trigger"
-    assert client.opened[0]["view"]["callback_id"] == "reach_stage1_submit"
-    assert client.opened[0]["view"]["blocks"][0]["element"]["action_id"] == "target_user"
 
 
 def test_target_selection_resolves_target_before_stage_two() -> None:

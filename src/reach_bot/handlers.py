@@ -53,9 +53,8 @@ def register_handlers(
         respond: Callable[..., Awaitable[None]],
         client: Any,
     ) -> None:
-        await ack()
         try:
-            await client.views_open(trigger_id=command["trigger_id"], view=render_reach_stage1())
+            await ack(trigger_id=command["trigger_id"], view=render_reach_stage1())
         except SlackApiError as exc:
             log.error("/reach Slack API error: %s", exc)
             await respond(
