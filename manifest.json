@@ -5,29 +5,20 @@
     "background_color": "#1d1c1d"
   },
   "features": {
-    "bot_user": {
-      "display_name": "Reach",
-      "always_online": false
-    },
     "app_home": {
-      "home_tab_enabled": true,
+      "home_tab_enabled": false,
       "messages_tab_enabled": true,
       "messages_tab_read_only_enabled": false
     },
-    "assistant_view": {
-      "assistant_description": "Reach helps you find the smallest useful audience when a teammate is unavailable.",
-      "suggested_prompts": [
-        {
-          "title": "Ask Reach for help",
-          "message": "Help me reach the right teammate for this request."
-        }
-      ]
+    "bot_user": {
+      "display_name": "Reach'em",
+      "always_online": true
     },
     "slash_commands": [
       {
         "command": "/reach",
-        "description": "Ask Reach for help in its direct-message conversation.",
-        "usage_hint": "natural-language request",
+        "description": "Find the right people to reach when a teammate is unavailable.",
+        "usage_hint": "@username [optional note]",
         "should_escape": false
       }
     ]
@@ -37,10 +28,13 @@
       "bot": [
         "commands",
         "chat:write",
-        "im:history",
-        "assistant:write"
+        "channels:read",
+        "users:read",
+        "im:write",
+        "im:history"
       ]
-    }
+    },
+    "pkce_enabled": false
   },
   "settings": {
     "interactivity": {
@@ -48,9 +42,8 @@
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
-    "event_subscriptions": {
-      "bot_events": ["message.im", "assistant_thread_started"]
-    },
-    "token_rotation_enabled": false
+    "token_rotation_enabled": false,
+    "app_level_token_rotation_enabled": false,
+    "is_mcp_enabled": false
   }
 }

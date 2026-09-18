@@ -128,13 +128,14 @@ async def slack_events(request: Request) -> Any:
     return await slack_handler.handle(request)
 
 
+async def run_socket_mode(app_token: str) -> None:
+    handler = AsyncSocketModeHandler(slack_app, app_token)
+    await handler.start_async()  # type: ignore[no-untyped-call]
+
+
 if __name__ == "__main__":
     if settings.slack_app_token:
-        async def run_socket_mode() -> None:
-            handler = AsyncSocketModeHandler(slack_app, settings.slack_app_token)
-            await handler.start_async()  # type: ignore[no-untyped-call]
-
-        asyncio.run(run_socket_mode())
+        asyncio.run(run_socket_mode(settings.slack_app_token))
     else:
         import uvicorn
 
