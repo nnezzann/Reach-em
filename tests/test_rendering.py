@@ -25,8 +25,12 @@ def test_rendering_has_presence_sections_and_ping_buttons():
 def test_reach_stage1_has_dispatching_target_picker():
     view = render_reach_stage1()
 
+    assert view["callback_id"] == "reach_stage1"
+    assert len(view["blocks"]) == 1
+    assert view["blocks"][0]["label"]["text"] == "Who are you trying to reach?"
     element = view["blocks"][0]["element"]
     assert element["type"] == "users_select"
+    assert element["action_id"] == "target_user"
     assert element["dispatch_action"] is True
 
 
