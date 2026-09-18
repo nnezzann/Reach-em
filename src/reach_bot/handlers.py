@@ -23,22 +23,6 @@ from reach_bot.rendering import (
 log = logging.getLogger(__name__)
 
 
-def parse_command(text: str) -> tuple[str, str | None]:
-    parts = text.strip().split(maxsplit=1)
-    if not parts:
-        raise ValueError("A target user is required")
-    # Handle both raw @username and Slack's encoded <@U123ABC> / <@U123ABC|name> formats
-    raw = parts[0].strip()
-    if raw.startswith("<@") and raw.endswith(">"):
-        inner = raw[2:-1]  # strip <@ and >
-        target = inner.split("|")[0]  # U123ABC|name -> U123ABC
-    else:
-        target = raw.lstrip("@")
-    if not target or not target.replace("-", "").isalnum():
-        raise ValueError(f"Could not parse a valid user from: {raw!r}")
-    return target, parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
-
-
 def decode_action_value(value: str) -> dict[str, str]:
     try:
         parsed = json.loads(value)
@@ -72,9 +56,6 @@ def register_handlers(
         await ack()
         try:
             await client.views_open(trigger_id=command["trigger_id"], view=render_reach_stage1())
-        except ValueError as exc:
-            log.warning("/reach parse error: %s", exc)
-            await respond(response_type="ephemeral", text=str(exc))
         except SlackApiError as exc:
             log.error("/reach Slack API error: %s", exc)
             await respond(
@@ -89,7 +70,10 @@ def register_handlers(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
     ) -> None:
         await ack()
-        target_id = str(body["actions"][0]["selected_user"])
+        target_id = str(body.get("actions", [{}])[0].get("selected_user", "")).strip()
+        if not target_id:
+            log.warning("target_user action did not include a selected user")
+            return
         requester_id = str(body["user"]["id"])
         ranked = await asyncio.to_thread(ranker, target_id, requester_id)
         await client.views_update(
@@ -104,7 +88,14 @@ def register_handlers(
     ) -> None:
         values = view["state"]["values"]
         metadata = json.loads(view.get("private_metadata", "{}"))
-        target_id = str(metadata["target_id"])
+        target_id = str(metadata.get("target_id", "")).strip()
+        if not target_id:
+            log.warning("reach_submit received a view without a target")
+            await ack(
+                response_action="errors",
+                errors={"message": "Select who you are trying to reach first."},
+            )
+            return
         requester_id = str(body["user"]["id"])
         suggested: list[str] = []
         for block in values.values():
