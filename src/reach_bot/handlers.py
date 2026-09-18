@@ -54,14 +54,17 @@ def register_handlers(
         client: Any,
     ) -> None:
         try:
-            await ack(trigger_id=command["trigger_id"], view=render_reach_stage1())
+            await client.views_open(trigger_id=command["trigger_id"], view=render_reach_stage1())
+            await ack()
         except SlackApiError as exc:
             log.error("/reach Slack API error: %s", exc)
+            await ack()
             await respond(
                 response_type="ephemeral", text=f"Slack API error: {exc.response['error']}"
             )
         except Exception as exc:
             log.exception("/reach unhandled error for user=%s", command.get("user_id"))
+            await ack()
             await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
 
     @slack_app.view("reach_stage1_submit")  # type: ignore[untyped-decorator]
