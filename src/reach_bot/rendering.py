@@ -125,6 +125,7 @@ def _button(
         "type": "button",
         "action_id": "ping_candidate",
         "text": {"type": "plain_text", "text": f"Ping {label}"},
+        "accessibility_label": f"Ping {label} about reaching the target",
         "value": json.dumps(value),
     }
 
@@ -157,20 +158,44 @@ def render_suggestions(
                     ],
                 }
             )
-    blocks.append(
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "why_these_people",
-                    "text": {"type": "plain_text", "text": "\u24d8 Why these people"},
-                    "value": target_id,
-                }
-            ],
-        }
-    )
     return blocks
+
+
+def render_recipient_actions(
+    *,
+    ping_id: str,
+    reach_request_id: str,
+    requester_id: str,
+    target_id: str,
+    candidate_id: str,
+) -> dict[str, Any]:
+    value = json.dumps(
+        {
+            "ping_id": ping_id,
+            "reach_request_id": reach_request_id,
+            "requester_id": requester_id,
+            "target_id": target_id,
+            "candidate_id": candidate_id,
+        },
+        separators=(",", ":"),
+    )
+    return {
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "action_id": action_id,
+                "text": {"type": "plain_text", "text": label},
+                "accessibility_label": label,
+                "value": value,
+            }
+            for action_id, label in (
+                ("outcome_helped", "\u2705 I know"),
+                ("outcome_unknown", "\u274c Don't know"),
+                ("outcome_more", "\U0001f4ac Reply with more"),
+            )
+        ],
+    }
 
 
 def render_ping_modal(
@@ -229,9 +254,9 @@ def render_why(ranked: RankedCandidates) -> list[dict[str, Any]]:
         presence = "active" if candidate.presence == "active" else "offline"
         evidence = []
         if candidate.channel_proximity:
-            evidence.append(f"shared-channel signal {candidate.channel_proximity:.3f}")
+            evidence.append("shared public channel")
         if candidate.thread_recency:
-            evidence.append(f"recent-thread signal {candidate.thread_recency:.3f}")
+            evidence.append("recent public thread")
         details = ", ".join(evidence) or "public signal"
         lines.append(f"<@{candidate.user_id}> \u2014 {presence} \u00b7 {details}")
     return [
