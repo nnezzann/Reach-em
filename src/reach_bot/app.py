@@ -11,10 +11,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk import WebClient
 
 from reach_bot.config import get_settings
-from reach_bot.conversation import ConversationStore
 from reach_bot.handlers import register_handlers
-from reach_bot.logging_config import configure_logging
-from reach_bot.nvidia import NvidiaClient
 from reach_bot.persistence import (
     MemoryRepository,
     PostgresRepository,
@@ -32,11 +29,7 @@ from reach_bot.rendering import render_suggestions
 from reach_bot.slack_provider import SlackSignalProvider
 
 settings = get_settings()
-configure_logging(settings.log_level, settings.log_file)
-logger = logging.getLogger(__name__)
-logger.info("Reach'em app starting")
-if not settings.nvidia_api_key:
-    logger.warning("NVIDIA assistant is disabled: NVIDIA_API_KEY is not configured")
+logging.basicConfig(level=settings.log_level)
 
 
 class EmptySignalProvider:
@@ -63,11 +56,10 @@ if settings.database_url:
     import psycopg
 
     repository = PostgresRepository(psycopg.connect(settings.database_url))
-slack_provider = SlackSignalProvider(
+provider: SignalProvider = SlackSignalProvider(
     WebClient(token=settings.slack_bot_token),
     affinity_source=repository.affinities,
 )
-provider: SignalProvider = slack_provider
 if settings.redis_url:
     import redis
 
@@ -99,23 +91,7 @@ def do_rank(target_id: str, requester_id: str) -> RankedCandidates:
     )
 
 
-register_handlers(
-    slack_app,
-    repository=repository,
-    ranker=do_rank,
-    renderer=render_suggestions,
-    assistant=NvidiaClient(
-        settings.nvidia_api_key,
-        base_url=settings.nvidia_base_url,
-        model=settings.nvidia_model,
-        timeout_seconds=settings.nvidia_timeout_seconds,
-    ),
-    conversations=ConversationStore(
-        settings.conversation_max_messages,
-        settings.conversation_max_characters,
-    ),
-    target_resolver=slack_provider.resolve_user,
-)
+register_handlers(slack_app, repository=repository, ranker=do_rank, renderer=render_suggestions)
 
 
 @api.get("/health")
