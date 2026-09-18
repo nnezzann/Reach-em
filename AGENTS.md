@@ -2,160 +2,225 @@
 
 ## 1. Problem Statement
 
-Slack workspaces have a recurring failure mode: when someone needs to reach a person urgently and a direct DM isn't working (recipient away, heads-down, Slack closed, or simply hasn't seen it), the fallback is posting in a shared channel. This interrupts every member of that channel — often dozens of people with no relationship to the person being sought — just to reach the 1–2 people who might actually know where they are or can relay the message.
+Slack workspaces have a recurring failure mode: when someone needs to reach
+a person urgently and a direct DM isn't working (recipient away,
+heads-down, Slack closed, or simply hasn't seen it), the fallback is
+posting in a shared channel. This interrupts every member of that
+channel — often dozens of people with no relationship to the person being
+sought — just to reach the 1–2 people who might actually know where they
+are or can relay the message.
 
-**Core principle: minimize the number of people interrupted while still surfacing the humans most likely to help.** The bot does not locate the target user itself — it proposes a short, ranked list of candidates, and a human makes the final call on who to ping. The bot augments human judgment; it does not replace it.
+**Core principle: minimize the number of people interrupted while still
+surfacing the humans most likely to help.** The bot does not locate the
+target user itself — it proposes a short, ranked list of candidates, and a
+human makes the final call on who to message. The bot augments human
+judgment; it does not replace it.
 
 ## 2. Non-Goals
 
-- Not a presence-tracking surveillance tool. It only reads what Slack's API already exposes (presence, public channel membership, public thread activity).
-- Not an auto-escalation system. It never pings anyone without a human explicitly choosing to.
-- Not trying to compute a single "best" person. It surfaces categorized candidates and lets the requester decide — no blended relevance score.
-- Does not and cannot read other people's private DMs (Slack API does not expose this to bots). All relational signal is derived from public channels and threads the bot has access to.
+- Not a presence-tracking surveillance tool. It only reads what Slack's API
+  already exposes (presence, public channel membership, public thread
+  activity).
+- Not an auto-escalation system. It never messages anyone without a human
+  explicitly composing and sending.
+- Not trying to compute a single "best" person. It surfaces categorized
+  candidates and lets the requester decide — no blended relevance score
+  shown to the user.
+- Does not and cannot read other people's private DMs (Slack API does not
+  expose this to bots). All relational signal is derived from public
+  channels and threads the bot has access to.
 
-## 3. Core Flow
+## 3. Core Flow (single-modal design)
 
-1. Requester triggers `/reach @X` (optionally with a short note, e.g. `/reach @X urgent - deploy is broken`).
-2. Bot computes a small set of candidate people ("near" X) using the ranking signals below.
-3. Bot replies **ephemerally** (visible only to the requester) with a compact, categorized list of candidates as interactive buttons.
-4. Requester taps a candidate's "Ping" button.
-5. Bot opens a small pre-filled modal with an editable one-line message.
-6. Requester confirms/edits and sends. Bot delivers it as a DM to the candidate, on the requester's behalf, with clear framing (see §6).
-7. Candidate can reply directly to the requester or the bot can offer a one-tap "I'll relay" / "Don't know" quick response.
+The flow is a single modal with two stages, not a message-then-click
+sequence — this removes an extra round trip and feels materially faster.
 
-The bot's own suggestion message is **always ephemeral** — it must never itself become a new source of channel clutter.
+1. Requester types `/reach` (no arguments needed).
+2. **Stage 1**: a modal opens immediately with one field — "Who are you
+   trying to reach?" (a user picker).
+3. The moment a target is selected, the same modal **updates in place**
+   (`views.update`, triggered by the field's `dispatch_action`) to show
+   **Stage 2**:
+   - Suggested candidates, pre-ranked and pre-checked (checkboxes, not
+     buttons — see §5.2), grouped by presence.
+   - An optional field: "Add anyone else who might be near them" (a
+     multi-user picker) — for candidates the requester knows about that
+     the algorithm didn't surface. This is a real signal, not just a
+     convenience field (see §7.3).
+   - A single editable message field, pre-filled with a default line.
+4. Requester hits **Send**. One composed message goes out to every
+   selected recipient (suggested + manually added, deduped).
+5. Each recipient receives the message with three reply actions:
+   **I know** / **Don't know** / **Reply with more** (see §6).
+6. Replies route back to the requester (directly or via the bot,
+   depending on the requester's delivery preference — see §8).
+
+The bot's own Stage 1/2 modal is never visible to anyone but the
+requester. Only the final composed message is seen by candidates, and only
+the specific candidates selected — never a channel-wide post.
 
 ## 4. Ranking Signals
 
-Do not combine signals into a single opaque score. Surface them as categorized evidence; let the human weigh relevance vs. reachability.
+Do not combine signals into a single opaque score. Rank internally using
+combined signals, but the *reasoning* is never shown by default (see §5.3)
+— only names, pre-checked in relevance order.
 
-### 4.1 Presence (primary sort axis)
-
-- Source: `users.getPresence` or presence change events.
-- Used to split candidates into two top-level buckets: **Active now** / **Offline**.
-- Presence is a _filter/sort key_, not a multiplier — an offline person with strong relational signal should still surface, just in the offline bucket, not be buried by a low score.
+### 4.1 Presence (primary sort/bucket axis)
+- Source: `users.getPresence` or presence change events, cached briefly
+  (Redis, short TTL) to avoid hammering the API.
+- Splits candidates into **Active now** / **Offline** groups within the
+  suggestion checkboxes.
 
 ### 4.2 Shared channel membership, weighted by channel size
-
-- For each channel X belongs to, list co-members.
-- Weight inversely by channel member count — two people sharing a 6-person channel is a much stronger proximity signal than sharing `#general` with 200 members.
-- Use the **smallest** mutual channel(s) as the primary structural signal ("probably works closely with X").
+- Co-members of channels the target belongs to, weighted inversely by
+  channel size — a shared 6-person channel is a much stronger signal than
+  a shared 200-person one.
+- Smallest mutual channel = strongest structural signal ("probably works
+  closely with the target").
 
 ### 4.3 Thread co-occurrence, with recency decay
+- People who've replied in the same threads as the target in public
+  channels, within a recency window (default 7 days, configurable).
+- A distinct, separate signal from channel membership — temporal/
+  contextual proximity rather than structural proximity. Don't blend the
+  two into one number; keep them as separate inputs to ranking.
 
-- Source: people who have replied in the same threads as X in public channels the bot can see.
-- This is a _temporal/contextual_ signal, distinct from channel membership — it answers "was recently talking to X," not "works near X."
-- Apply a recency cutoff (default: 7 days). A strong co-occurrence signal from a month ago should rank below a weaker one from this morning.
-- Do not fold this into the channel-size score — keep it as a separate, clearly labeled signal category.
+### 4.4 Learned affinity (from real outcomes — v2)
+- As people respond "I know" / "Don't know" to being pinged for a given
+  target, that outcome data trains a per-(target, candidate) affinity
+  score over time (see Technical Spec §3 for schema).
+- Only applied once a candidate has enough historical samples
+  (default: 3+) — below that threshold, ranking relies purely on
+  structural signals (§4.2–4.3). This avoids one noisy data point
+  distorting the ranking for a new pair.
+- Manually-added candidates (§3, Stage 2 "add anyone else" field) who
+  later get a positive outcome are a *stronger* training signal than
+  algorithmically-suggested ones, since a human explicitly vouched for
+  them — weight accordingly in the learning job.
 
-### 4.4 Candidate cap
+### 4.5 Candidate cap
+- Suggested list capped at ~5–6 total across both presence groups by
+  default (configurable) — the modal should be scannable in a couple of
+  seconds, not a long scroll. The manual "add anyone else" field has no
+  cap, since that's explicit human input, not algorithmic noise.
 
-- Cap each bucket (Active / Offline) at 2–3 candidates by default, configurable. The goal is "minimum viable interrupt" — a long list defeats the purpose even if the underlying ranking is accurate.
-
-## 5. Output / Message Design
+## 5. Modal & Message Design
 
 ### 5.1 Guiding principle
+The modal is a decision surface, not a report. Every element should let
+the requester act with minimal reading. If filling out the modal takes
+longer than just posting in the channel, the tool has failed its purpose.
 
-The message is a decision surface, not a report. Buttons are the content; text is only load-bearing where a tap can't replace it. If reading the suggestion takes longer than just posting in the channel, the tool has failed at its core purpose.
+### 5.2 Stage 2 layout
+- **Suggested section**: checkboxes, grouped/labeled by presence
+  (🟢 active / ⚪ offline), pre-checked on the top 1–2 ranked candidates so
+  the fast path is "open modal → hit Send" with zero extra taps for the
+  common case.
+- Checkboxes, not buttons: this is now a batch action (one message to
+  potentially several people), not a single ping-and-click as in the
+  original design — a multi-select input matches that.
+- **Manual add field**: `multi_users_select`, optional, clearly labeled as
+  "people you think might be near them" — distinct in purpose from the
+  suggested list, not merged into it.
+- **Message field**: single `plain_text_input`, pre-filled with a
+  reasonable default (editable), sent identically to every selected
+  recipient.
 
-### 5.2 Default (minimal) view
+### 5.3 "Why" detail (opt-in only, v2)
+No ranking justification is shown by default. If added later, gate it
+behind an explicit affordance (e.g. a small help/info element) rather than
+inline text — the default view stays minimal regardless.
 
-```
-🔍 Reaching @X
+### 5.4 Things to deliberately avoid
+- No per-candidate justification text in the default suggestion list.
+- No color-coded elements beyond what Slack's own `primary`/`danger`
+  button styles are used for semantically (e.g. `danger` reserved for a
+  genuine escalation action, if ever added).
+- No multi-step modal beyond the two stages described — don't fragment
+  further.
 
-🟢 Active now
-[ Ping @A ]  [ Ping @C ]
+## 6. Recipient-Side Reply Actions
 
-⚪ Offline
-[ Ping @B ]  [ Ping @D ]
+Every outgoing message includes three actions, regardless of delivery
+mode (bot-relay or send-as-user — see §8):
 
-[ ⓘ Why these people ]
-```
+- **✅ I know** — records a positive outcome; optionally opens a small
+  one-field modal to capture where/how to reach the target, relayed back
+  to the requester.
+- **❌ Don't know** — records an explicit negative outcome (distinct from
+  a timeout/no-response — see Technical Spec §3.1 for why this
+  distinction matters to the learning model).
+- **💬 Reply with more** — opens a one-field modal for a free-text reply,
+  relayed back to the requester as a DM.
 
-No channel names, no member counts, no per-person justification in the default view. Names + one tap is the entire interface.
+These actions are the system's primary source of outcome data, which
+feeds the learned affinity ranking over time (§4.4). Framing them clearly
+and making them low-effort (one tap, or one tap + one short field) is
+directly what makes the learning loop viable — if replying is annoying,
+people won't use the buttons and the model never improves.
 
-### 5.3 "Why" detail (opt-in only)
+## 7. Delivery Modes
 
-Tapping "ⓘ Why these people" opens a modal or posts a second ephemeral message with the underlying evidence per candidate, e.g.:
+### 7.1 Default: bot-relay
+The message is sent from the bot's identity, clearly framed so the
+recipient understands who is actually asking and why (e.g. "Reach,
+relaying for @Niel: ..."). This requires no additional per-user setup and
+works for every requester by default.
 
-```
-@A — active · smallest shared channel (#taparide-backend, 6 members)
-@D — offline · replied in 3 threads with X this week (#taparide-infra)
-```
+### 7.2 Opt-in: send as yourself
+A requester can instead choose to have the message sent from their own
+Slack identity rather than the bot's. This requires:
+- A one-time per-user OAuth authorization (user token, distinct from the
+  bot's install-time token) — see Technical Spec §5 for the flow.
+- A **Settings tab** (App Home) where a user can connect/disconnect this,
+  see its current status, and understand what it grants (see §7.4).
+- A graceful fallback: if a requester has not connected, their messages
+  send via bot-relay automatically — this is never a blocking
+  requirement to use `/reach`.
 
-This detail must never appear in the default message. It exists purely for debugging/trust-building, not for the common-case interaction.
+### 7.3 Why this is opt-in, not default
+Sending as the user requires a materially more sensitive credential (a
+user-scoped token capable of posting as that person generally, not just
+through this flow) and a real consent step. Bot-relay already conveys "who
+is asking and why" clearly without that additional security surface — so
+it remains the default, and send-as-yourself is offered as a preference
+for requesters who specifically want the message to look and feel like it
+came directly from them.
 
-### 5.4 Block Kit structure
-
-- `header` — "Reaching @X"
-- `context` — one line, only if a note was included with the command
-- `section` + `actions` block per bucket (Active / Offline), buttons only
-- `actions` block (single button) for "Why these people," rendered as a low-emphasis element (plain button, no `style` override)
-- Use `button` elements exclusively for candidate selection — no `select` / dropdown menus. A dropdown costs an extra interaction (open, then choose); a button is one tap. This matters under time pressure.
-
-### 5.5 Things to deliberately avoid
-
-- No emoji or avatar per person — adds visual noise without decision value.
-- No color-coded button styles, except reserving Slack's `danger` style for a genuine escalation action (e.g. "Escalate to manager"), if that feature is ever added. Never use color as decoration.
-- No dividers between every sub-section — one divider between Active/ Offline is sufficient structure.
-- No full sentences justifying a candidate in the default view.
-
-## 6. Ping Interaction (button click)
-
-Tapping "Ping @A" does **not** silently fire a message. It:
-
-1. Opens a modal (`views.open`) with a single pre-filled, editable text field: a short templated message (e.g. "Hey, trying to reach X urgently — do you know if they're around?").
-2. Requester can edit the line before sending.
-3. On submit, bot sends it as a DM to the candidate, framed clearly so the recipient understands why they're being pinged and by whom — never as an anonymous or unexplained interruption.
-4. Optionally: candidate gets one-tap quick replies ("I'll relay" / "Don't know") to close the loop fast.
-
-This is the only "form" in the system — one field, pre-filled, editable. No multi-field forms under time pressure.
-
-## 7. Architecture Notes
-
-- **Trigger**: slash command (`/reach`), not passive event listening — this keeps the bot opt-in and avoids background surveillance concerns.
-- **Data fetching**: presence + channel membership + thread replies via Slack Web API. Cache channel-membership data where reasonable to avoid hammering the API on every invocation; presence should be fetched fresh.
-- **State**: minimal. The bot doesn't need persistent storage for v1 beyond short-lived interaction state (which candidate list belongs to which ephemeral message, for button handling).
-- **Privacy boundary**: only public channels/threads the bot is installed into are used for signal. No private channel or DM content is read, consistent with Slack API limitations and this project's non-goals.
+### 7.4 Settings tab requirements
+Accessible from the app's Home tab. Must show, at minimum:
+- Current delivery mode (bot-relay / send-as-yourself) with a toggle.
+- Connect/Disconnect action for the user token when relevant.
+- A short, plain-language explanation of what granting this permission
+  allows (posting messages as you, via this app, when you use `/reach`) —
+  not just a scope name.
+- Disconnecting immediately reverts the user to bot-relay for all future
+  messages; it does not affect already-sent messages.
 
 ## 8. Build Priority (v1 → v2)
 
-**v1 (ship this first):**
+**v1:**
+- Two-stage modal (`/reach` → target picker → suggested + manual +
+  message).
+- Static ranking only (presence + channel-size); skip thread
+  co-occurrence and learned affinity initially.
+- Bot-relay delivery only — no send-as-user, no Settings tab yet.
+- Reply buttons (I know / Don't know / Reply with more) wired to log
+  outcomes, even if the learning job isn't consuming them yet.
 
-- Slash command → presence + channel-size ranking only (skip thread co-occurrence initially)
-- Ephemeral Block Kit message, Active/Offline buckets, capped candidates
-- Ping button → editable modal → DM send
-- No "Why" detail yet if it slows down shipping
+**v2:**
+- Thread co-occurrence signal with recency decay.
+- Learned affinity scoring, blended into ranking once sample thresholds
+  are met.
+- Send-as-yourself delivery mode + per-user OAuth flow + Settings tab.
+- "Why these people" opt-in detail view.
 
-**v2 (after validating v1 against real usage):**
+## 9. Open Decisions
 
-- Add thread co-occurrence signal with recency decay
-- Add "Why these people" detail view
-- Add quick-reply buttons for the pinged candidate
-- Revisit candidate cap / bucket design based on real feedback — don't over-tune ranking before seeing where v1 picks bad candidates
-
-## 9. Open Decisions (flag to requester if ambiguous during implementation)
-
-- Tech stack: Python, using the locked `uv` workflow and the dependencies declared in `pyproject.toml`.
-- Whether the bot sends the ping DM as itself ("relaying for Niel") or the requester sends it directly via a Slack-generated draft — confirm before building the send path.
-- Default recency window for thread co-occurrence (currently proposed: 7 days) — adjustable, not fixed by this spec.
-
-## 10. Project Development Guidelines
-
-- Build the project in Python. Prefer the standard library and established project dependencies over introducing new packages without a clear need.
-- Use a supported, modern Python version and keep runtime, development, and test dependencies explicitly declared.
-- Use type hints for public interfaces and keep Slack API, ranking, and presentation concerns separated into focused modules.
-- Keep secrets, signing tokens, and workspace-specific configuration out of source control. Load them from environment variables or a local, ignored configuration file.
-- Treat Slack user data as sensitive. Request only the scopes required for the feature, preserve the public-channel privacy boundary, and do not log message contents or tokens.
-- Add focused automated tests for ranking, candidate caps, presence buckets, Block Kit payloads, and interaction validation as those components are implemented.
-- Run the relevant formatter, linter, type checker, and tests before completing a change. Do not claim a change is complete when required validation is failing.
-- Update this document and other directly related documentation when implementation decisions change the stated behavior.
-
-## 11. Git and Commit Guidelines
-
-- The repository is named `Reach'em`.
-- Each feature or fix must be an atomic commit: one coherent behavior or correction per commit, with no unrelated cleanup mixed in.
-- Commit messages should be short, imperative, and describe the user-visible or technical change.
-- Do not create commits with a `Co-authored-by: Copilot` trailer or any other Copilot co-author attribution.
-- Do not amend existing commits unless explicitly requested.
-- Keep generated files, local environments, credentials, tokens, and other machine-specific artifacts out of commits.
+- Tech stack: not yet locked (Node vs Python) — confirm before
+  scaffolding.
+- Default candidate cap and thread-recency window — tunable, proposed
+  defaults given in §4, adjust after real usage.
+- Whether "I know" should always prompt for a location/detail reply, or
+  just log a positive outcome silently — leaning toward prompting, since
+  the detail is the actually useful part for the requester, but confirm.
