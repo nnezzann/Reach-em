@@ -72,22 +72,43 @@ def register_handlers(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
     ) -> None:
         """Handle Stage 1 submission (target user selection) and transition to Stage 2."""
+        values = view["state"]["values"]
+        target_id = str(values["target"]["target_user"].get("selected_user", "")).strip()
+        if not target_id:
+            await ack(
+                response_action="errors",
+                errors={"target": "Please select who you are trying to reach."},
+            )
+            return
+        # Ack immediately — Slack enforces a 3-second window and the ranking
+        # call makes multiple Slack API requests that will exceed that limit.
+        await ack()
+        requester_id = str(body["user"]["id"])
+        view_id = view["id"]
         try:
-            values = view["state"]["values"]
-            target_id = str(values["target"]["target_user"].get("selected_user", "")).strip()
-            if not target_id:
-                await ack(
-                    response_action="errors",
-                    errors={"target": "Please select who you are trying to reach."},
-                )
-                return
-            requester_id = str(body["user"]["id"])
             ranked = await asyncio.to_thread(ranker, target_id, requester_id)
             stage2_view = render_reach_stage2(target_id, ranked, requester_id=requester_id)
-            await ack(response_action="update", view=stage2_view)
+            await client.views_update(view_id=view_id, view=stage2_view)
         except Exception as exc:
             log.exception("reach_stage1_submit error: %s", exc)
-            await ack()
+            await client.views_update(
+                view_id=view_id,
+                view={
+                    "type": "modal",
+                    "callback_id": "reach_stage1_submit",
+                    "title": {"type": "plain_text", "text": "Reach someone"},
+                    "close": {"type": "plain_text", "text": "Close"},
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f":warning: Something went wrong: {exc}",
+                            },
+                        }
+                    ],
+                },
+            )
 
     @slack_app.view("reach_submit")  # type: ignore[untyped-decorator]
     async def reach_submit(
@@ -125,6 +146,7 @@ def register_handlers(
                 errors={"message": "Enter a message to send."},
             )
             return
+        # Ack immediately before the slow DB writes and chat_postMessage calls.
         await ack()
         request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
         ranked = await asyncio.to_thread(ranker, target_id, requester_id)
