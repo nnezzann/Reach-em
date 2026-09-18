@@ -1,5 +1,13 @@
 # AGENTS.md — Slack "Reach" Bot
 
+## Git Commit Guidelines
+
+When creating commits for this project:
+- Do NOT add the "Co-Authored-By: Devin" message to commit messages
+- Use conventional commit format with clear, descriptive messages
+- Focus on the "why" rather than the "what" in commit messages
+- Keep commits atomic and focused on single changes
+
 ## 1. Problem Statement
 
 Slack workspaces have a recurring failure mode: when someone needs to reach
