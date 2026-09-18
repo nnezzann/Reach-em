@@ -24,21 +24,73 @@ class SlackSignalProvider:
         channels: list[dict[str, Any]] = result.get("channels", [])
         return [str(channel["id"]) for channel in channels if not channel.get("is_private", False)]
 
+    def _iter_members(self) -> list[dict[str, Any]]:
+        """Fetch the full workspace member list, following cursor pagination.
+
+        The previous implementation used a single `users_list(limit=1000)` call,
+        which silently drops members past the first page on larger workspaces.
+        """
+        members: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            response = self.client.users_list(limit=200, cursor=cursor or "")
+            members.extend(response.get("members", []))
+            cursor = response.get("response_metadata", {}).get("next_cursor") or None
+            if not cursor:
+                break
+        return members
+
     def resolve_user(self, target: str) -> str:
+        """Resolve a slash-command target into a Slack user ID.
+
+        The happy path is a real `<@Uxxxx|name>` mention, which Slack sends
+        automatically when the user is picked from its own @mention
+        autocomplete -- that's unambiguous and needs no lookup at all.
+
+        The fallback below only fires when someone typed a name as plain text
+        instead of picking from the dropdown. It matches *exactly* against
+        username / real name / display name and nothing looser: guessing at
+        the wrong person is worse than failing loudly, since this app pings a
+        real human on someone's behalf. On no match (or an ambiguous one), it
+        raises with guidance to use the autocomplete instead of trying to be
+        clever about it.
+        """
         normalized = target.strip().strip("<@>").removeprefix("@").lower()
+
+        # Already a raw user/workspace ID (from a resolved <@U123|name> mention,
+        # or someone pasting an ID directly).
         if normalized.startswith(("u", "w")) and normalized[1:].isalnum():
             return normalized.upper()
-        response = self.client.users_list(limit=1000)
-        members: list[dict[str, Any]] = response.get("members", [])
-        for user in members:
-            names = {
+
+        members = self._iter_members()
+        matches = [
+            user
+            for user in members
+            if user.get("id")
+            and normalized
+            in {
                 str(user.get("name", "")).lower(),
                 str(user.get("real_name", "")).lower(),
                 str(user.get("profile", {}).get("display_name", "")).lower(),
             }
-            if normalized in names and user.get("id"):
-                return str(user["id"])
-        raise ValueError(f"Slack user @{normalized} was not found.")
+        ]
+
+        if len(matches) == 1:
+            return str(matches[0]["id"])
+        if len(matches) > 1:
+            # Exact-match collisions are rare but possible (e.g. duplicate
+            # display names) -- surface it rather than silently picking one.
+            options = ", ".join(sorted({u.get("name", "") for u in matches}))
+            raise ValueError(
+                f"Multiple Slack users match '{normalized}' ({options}). "
+                "Pick the person from Slack's @mention autocomplete instead."
+            )
+
+        raise ValueError(
+            f"Slack user @{normalized} was not found. "
+            "Start typing @ and pick them from Slack's autocomplete list "
+            "so the name resolves correctly."
+        )
 
     def channel_members(self, channel_id: str) -> list[str]:
         result = self.client.conversations_members(channel=channel_id)
