@@ -1,8 +1,14 @@
 from reach_bot.ranking import Candidate, RankedCandidates
-from reach_bot.rendering import render_reach_stage1, render_reach_stage2, render_suggestions
+from reach_bot.rendering import (
+    render_reach_stage1,
+    render_reach_stage2,
+    render_recipient_actions,
+    render_suggestions,
+    render_why,
+)
 
 
-def test_rendering_is_ephemeral_friendly_and_button_only():
+def test_rendering_has_presence_sections_and_ping_buttons():
     blocks = render_suggestions(
         "target", RankedCandidates((Candidate("a", presence="active"),), ())
     )
@@ -10,7 +16,10 @@ def test_rendering_is_ephemeral_friendly_and_button_only():
     assert any(
         e.get("action_id") == "ping_candidate" for b in blocks for e in b.get("elements", [])
     )
-    assert not any(b.get("type") == "divider" and i == 0 for i, b in enumerate(blocks))
+    assert any(b.get("text", {}).get("text") == "*Active now*" for b in blocks)
+    assert not any(
+        e.get("action_id") == "why_these_people" for b in blocks for e in b.get("elements", [])
+    )
 
 
 def test_reach_stage1_has_dispatching_target_picker():
@@ -42,3 +51,42 @@ def test_reach_stage2_groups_candidates_and_prechecks_top_two():
         "active-2",
     ]
     assert any(block["element"]["type"] == "multi_users_select" for block in view["blocks"])
+
+
+def test_recipient_actions_include_all_ping_context_and_expected_interactions():
+    import json
+
+    block = render_recipient_actions(
+        ping_id="ping",
+        reach_request_id="request",
+        requester_id="requester",
+        target_id="target",
+        candidate_id="candidate",
+    )
+
+    assert [element["action_id"] for element in block["elements"]] == [
+        "outcome_helped",
+        "outcome_unknown",
+        "outcome_more",
+    ]
+    assert json.loads(block["elements"][0]["value"]) == {
+        "ping_id": "ping",
+        "reach_request_id": "request",
+        "requester_id": "requester",
+        "target_id": "target",
+        "candidate_id": "candidate",
+    }
+    assert all(element["accessibility_label"] for element in block["elements"])
+
+
+def test_why_detail_does_not_expose_internal_signal_scores():
+    blocks = render_why(
+        RankedCandidates(
+            (Candidate("active", presence="active", channel_proximity=0.5),),
+            (),
+        )
+    )
+
+    text = blocks[1]["text"]["text"]
+    assert "0.5" not in text
+    assert "shared public channel" in text

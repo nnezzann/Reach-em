@@ -15,6 +15,7 @@ from reach_bot.rendering import (
     render_ping_modal,
     render_reach_stage1,
     render_reach_stage2,
+    render_recipient_actions,
     render_reply_modal,
     render_why,
 )
@@ -118,8 +119,14 @@ def register_handlers(
                 errors={"manual_candidates": "Select at least one recipient."},
             )
             return
-        await ack()
         message = str(values["message"]["message"]["message_input"].get("value", "")).strip()
+        if not message:
+            await ack(
+                response_action="errors",
+                errors={"message": "Enter a message to send."},
+            )
+            return
+        await ack()
         request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
         ranked = await asyncio.to_thread(ranker, target_id, requester_id)
         by_id = {candidate.user_id: candidate for candidate in (*ranked.active, *ranked.offline)}
@@ -138,22 +145,13 @@ def register_handlers(
                 channel=candidate_id,
                 text=f"Reach, relaying for <@{requester_id}>:\n{message}",
                 blocks=[
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "action_id": action_id,
-                                "text": {"type": "plain_text", "text": label},
-                                "value": json.dumps({"ping_id": ping.id}),
-                            }
-                            for action_id, label in (
-                                ("outcome_helped", "✅ I know"),
-                                ("outcome_unknown", "❌ Don't know"),
-                                ("outcome_more", "💬 Reply with more"),
-                            )
-                        ],
-                    }
+                    render_recipient_actions(
+                        ping_id=ping.id,
+                        reach_request_id=request.id,
+                        requester_id=requester_id,
+                        target_id=target_id,
+                        candidate_id=candidate_id,
+                    )
                 ],
             )
 
@@ -198,26 +196,18 @@ def register_handlers(
         await ack()
         candidate_id, target_id, ping_id = view["private_metadata"].split(":", 2)
         message = view["state"]["values"]["message"]["message_input"]["value"]
+        ping = repository.get_ping(ping_id)
         await client.chat_postMessage(
             channel=candidate_id,
             text=f"<@{body['user']['id']}> is trying to reach you about <@{target_id}>:\n{message}",
             blocks=[
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "action_id": action_id,
-                            "text": {"type": "plain_text", "text": label},
-                            "value": json.dumps({"ping_id": ping_id}),
-                        }
-                        for action_id, label in (
-                            ("outcome_helped", "I'll relay"),
-                            ("outcome_relayed", "I know where they are"),
-                            ("outcome_unknown", "Don't know"),
-                        )
-                    ],
-                }
+                render_recipient_actions(
+                    ping_id=ping_id,
+                    reach_request_id=ping.reach_request_id if ping else "",
+                    requester_id=ping.requester_id if ping else str(body["user"]["id"]),
+                    target_id=ping.target_id if ping else target_id,
+                    candidate_id=ping.candidate_id if ping else candidate_id,
+                )
             ],
         )
 
