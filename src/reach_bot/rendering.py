@@ -5,6 +5,107 @@ from typing import Any
 
 from reach_bot.ranking import Candidate, RankedCandidates
 
+DEFAULT_MESSAGE = "Do you know where they are or how to reach them?"
+
+
+def render_reach_stage1() -> dict[str, Any]:
+    return {
+        "type": "modal",
+        "callback_id": "reach_stage1",
+        "title": {"type": "plain_text", "text": "Reach someone"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "target",
+                "label": {"type": "plain_text", "text": "Who are you trying to reach?"},
+                "element": {
+                    "type": "users_select",
+                    "action_id": "target_user",
+                    "placeholder": {"type": "plain_text", "text": "Select a person"},
+                    "dispatch_action": True,
+                },
+            }
+        ],
+    }
+
+
+def render_reach_stage2(
+    target_id: str,
+    ranked: RankedCandidates,
+    *,
+    requester_id: str,
+    default_message: str = DEFAULT_MESSAGE,
+) -> dict[str, Any]:
+    candidates = (*ranked.active, *ranked.offline)
+    checked_ids = {candidate.user_id for candidate in candidates[:2]}
+    blocks: list[dict[str, Any]] = []
+    for label, group in (("Active now", ranked.active), ("Offline", ranked.offline)):
+        if not group:
+            continue
+        options = [
+            {
+                "text": {"type": "plain_text", "text": candidate.user_id},
+                "value": candidate.user_id,
+            }
+            for candidate in group
+        ]
+        initial_options = [option for option in options if option["value"] in checked_ids]
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": f"suggested_{label.lower().replace(' ', '_')}",
+                "label": {"type": "plain_text", "text": label},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "suggested_candidates",
+                    "options": options,
+                    "initial_options": initial_options,
+                },
+                "optional": True,
+            }
+        )
+    blocks.extend(
+        [
+            {
+                "type": "input",
+                "block_id": "manual_candidates",
+                "label": {
+                    "type": "plain_text",
+                    "text": "Add anyone else who might be near them",
+                },
+                "element": {
+                    "type": "multi_users_select",
+                    "action_id": "manual_candidates",
+                    "placeholder": {"type": "plain_text", "text": "Optional"},
+                },
+                "optional": True,
+            },
+            {
+                "type": "input",
+                "block_id": "message",
+                "label": {"type": "plain_text", "text": "Message"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "message_input",
+                    "initial_value": default_message,
+                    "multiline": False,
+                },
+            },
+        ]
+    )
+    return {
+        "type": "modal",
+        "callback_id": "reach_submit",
+        "private_metadata": json.dumps(
+            {"requester_id": requester_id, "target_id": target_id}, separators=(",", ":")
+        ),
+        "title": {"type": "plain_text", "text": "Reach someone"},
+        "submit": {"type": "plain_text", "text": "Send"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
+
 
 def _button(
     candidate: Candidate,
@@ -92,6 +193,29 @@ def render_ping_modal(
                     "type": "plain_text_input",
                     "action_id": "message_input",
                     "initial_value": text,
+                    "multiline": False,
+                },
+            }
+        ],
+    }
+
+
+def render_reply_modal(ping_id: str) -> dict[str, Any]:
+    return {
+        "type": "modal",
+        "callback_id": "reply_more_submit",
+        "private_metadata": ping_id,
+        "title": {"type": "plain_text", "text": "Reply to Reach"},
+        "submit": {"type": "plain_text", "text": "Send"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "reply",
+                "label": {"type": "plain_text", "text": "Reply"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "reply_input",
                     "multiline": False,
                 },
             }

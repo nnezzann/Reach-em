@@ -14,8 +14,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     min_sample_threshold: int = 3
     max_per_bucket: int = 3
+    max_suggested_candidates: int = 6
     thread_recency_days: int = 7
     include_thread_signal: bool = False
+    include_affinity: bool = False
     affinity_decay_halflife_days: float = 30.0
     presence_cache_ttl_seconds: int = 45
 
