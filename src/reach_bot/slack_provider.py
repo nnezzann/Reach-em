@@ -33,7 +33,11 @@ class SlackSignalProvider:
         members: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
-            response = self.client.users_list(limit=200, cursor=cursor or "")
+            response: Any
+            if cursor:
+                response = self.client.users_list(limit=200, cursor=cursor)
+            else:
+                response = self.client.users_list(limit=200)
             members.extend(response.get("members", []))
             cursor = response.get("response_metadata", {}).get("next_cursor") or None
             if not cursor:

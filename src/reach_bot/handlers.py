@@ -10,10 +10,10 @@ from typing import Any
 
 from slack_sdk.errors import SlackApiError
 
-log = logging.getLogger(__name__)
-
 from reach_bot.persistence import PingOutcome, ReachRepository
 from reach_bot.rendering import render_ping_modal, render_why
+
+log = logging.getLogger(__name__)
 
 
 def parse_command(text: str) -> tuple[str, str | None]:
@@ -92,12 +92,14 @@ def register_handlers(
             await respond(response_type="ephemeral", text=str(exc))
         except SlackApiError as exc:
             log.error("/reach Slack API error: %s", exc)
-            await respond(response_type="ephemeral", text=f"Slack API error: {exc.response['error']}")
+            await respond(
+                response_type="ephemeral", text=f"Slack API error: {exc.response['error']}"
+            )
         except Exception as exc:
             log.exception("/reach unhandled error for user=%s", command.get("user_id"))
             await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
 
-    @slack_app.action(re.compile(r"^ping_candidate_"))  # type: ignore[untyped-decorator]
+    @slack_app.action(re.compile(r"^ping_candidate(?:_|$)"))  # type: ignore[untyped-decorator]
     async def ping_candidate(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
     ) -> None:
@@ -120,10 +122,16 @@ def register_handlers(
         target_id = str(body["actions"][0]["value"])
         try:
             ranked = await asyncio.to_thread(ranker, target_id, str(body["user"]["id"]))
-            await respond(response_type="ephemeral", replace_original=False, blocks=render_why(ranked))
+            await respond(
+                response_type="ephemeral", replace_original=False, blocks=render_why(ranked)
+            )
         except Exception as exc:
             log.exception("why_these_people error for target=%s", target_id)
-            await respond(response_type="ephemeral", replace_original=False, text=f"Something went wrong: {exc}")
+            await respond(
+                response_type="ephemeral",
+                replace_original=False,
+                text=f"Something went wrong: {exc}",
+            )
 
     @slack_app.view("ping_submit")  # type: ignore[untyped-decorator]
     async def ping_submit(
