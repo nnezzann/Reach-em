@@ -88,6 +88,7 @@ def test_bare_reach_command_opens_initial_modal() -> None:
 
 def test_target_selection_resolves_target_before_stage_two() -> None:
     ranked_for: list[tuple[str, str]] = []
+    acknowledgements: list[dict[str, Any]] = []
 
     def ranker(target_id: str, requester_id: str) -> RankedCandidates:
         ranked_for.append((target_id, requester_id))
@@ -96,33 +97,32 @@ def test_target_selection_resolves_target_before_stage_two() -> None:
     app, client = _register(ranker=ranker)
 
     async def ack(**kwargs: Any) -> None:
-        # Simulate the response_action="update" ack
-        if kwargs.get("response_action") == "update":
-            client.updated.append({"view": kwargs.get("view")})
+        acknowledgements.append(kwargs)
 
     asyncio.run(
         app.handlers["reach_stage1_submit"](
             ack=ack,
-            body={
-                "user": {"id": "U-requester"},
-                "view": {"id": "V1", "hash": "H1"},
-            },
+            body={"user": {"id": "U-requester"}},
             view={
+                "id": "V1",
+                "hash": "H1",
                 "state": {
                     "values": {
-                        "target": {
-                            "target_user": {
-                                "selected_user": "U-target"
-                            }
-                        }
+                        "target": {"target_user": {"selected_user": "U-target"}}
                     }
-                }
+                },
             },
             client=client,
         )
     )
 
     assert ranked_for == [("U-target", "U-requester")]
+    assert len(acknowledgements) == 1
+    update_ack = acknowledgements[0]
+    assert update_ack["response_action"] == "update"
+    assert update_ack["view"]["callback_id"] == "reach_stage1_submit"
+    assert "Finding the best people" in update_ack["view"]["blocks"][0]["text"]["text"]
+    assert client.updated[0]["view_id"] == "V1"
     assert client.updated[0]["view"]["callback_id"] == "reach_submit"
     assert '"target_id":"U-target"' in client.updated[0]["view"]["private_metadata"]
 

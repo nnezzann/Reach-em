@@ -53,18 +53,19 @@ def register_handlers(
         respond: Callable[..., Awaitable[None]],
         client: Any,
     ) -> None:
+        # ack() must be the very first thing we do — Slack gives a 3-second
+        # window to acknowledge the command, and anything before this call
+        # (including the views_open network request below) eats into it.
+        await ack()
         try:
             await client.views_open(trigger_id=command["trigger_id"], view=render_reach_stage1())
-            await ack()
         except SlackApiError as exc:
             log.error("/reach Slack API error: %s", exc)
-            await ack()
             await respond(
                 response_type="ephemeral", text=f"Slack API error: {exc.response['error']}"
             )
         except Exception as exc:
             log.exception("/reach unhandled error for user=%s", command.get("user_id"))
-            await ack()
             await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
 
     @slack_app.view("reach_stage1_submit")  # type: ignore[untyped-decorator]
@@ -82,7 +83,28 @@ def register_handlers(
             return
         # Ack immediately — Slack enforces a 3-second window and the ranking
         # call makes multiple Slack API requests that will exceed that limit.
-        await ack()
+        # A bare ack() here would tell Slack to close the modal, which
+        # invalidates view_id before the views_update call below runs — so
+        # we ack with response_action="update" and a loading view instead,
+        # keeping the modal (and its view_id) alive.
+        await ack(
+            response_action="update",
+            view={
+                "type": "modal",
+                "callback_id": "reach_stage1_submit",
+                "title": {"type": "plain_text", "text": "Reach someone"},
+                "close": {"type": "plain_text", "text": "Close"},
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":hourglass_flowing_sand: Finding the best people to reach...",
+                        },
+                    }
+                ],
+            },
+        )
         requester_id = str(body["user"]["id"])
         view_id = view["id"]
         try:
