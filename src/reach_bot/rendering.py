@@ -35,8 +35,13 @@ def render_reach_stage2(
     ranked: RankedCandidates,
     *,
     requester_id: str,
-    default_message: str = DEFAULT_MESSAGE,
+    names: dict[str, str] | None = None,
+    default_message: str | None = None,
 ) -> dict[str, Any]:
+    names = names or {}
+    # plain_text options (checkbox labels) never resolve <@Uxxxx> mention
+    # syntax -- Slack shows the literal characters. Use the resolved
+    # display name, falling back to the raw ID only if the lookup failed.
     candidates = (*ranked.active, *ranked.offline)
     checked_ids = {candidate.user_id for candidate in candidates[:2]}
     blocks: list[dict[str, Any]] = []
@@ -45,7 +50,10 @@ def render_reach_stage2(
             continue
         options = [
             {
-                "text": {"type": "plain_text", "text": candidate.user_id},
+                "text": {
+                    "type": "plain_text",
+                    "text": names.get(candidate.user_id, candidate.user_id),
+                },
                 "value": candidate.user_id,
             }
             for candidate in group
@@ -65,6 +73,10 @@ def render_reach_stage2(
                 "optional": True,
             }
         )
+    # Same reasoning as above -- plain_text_input's initial_value is literal
+    # text, so bake the resolved target name in rather than mention syntax.
+    target_name = names.get(target_id, target_id)
+    message_text = default_message or f"Have you seen {target_name}? " + DEFAULT_MESSAGE
     blocks.extend(
         [
             {
@@ -88,7 +100,7 @@ def render_reach_stage2(
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "message_input",
-                    "initial_value": default_message,
+                    "initial_value": message_text,
                     "multiline": False,
                 },
             },

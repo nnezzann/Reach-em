@@ -109,7 +109,11 @@ def register_handlers(
         view_id = view["id"]
         try:
             ranked = await asyncio.to_thread(ranker, target_id, requester_id)
-            stage2_view = render_reach_stage2(target_id, ranked, requester_id=requester_id)
+            candidate_ids = {c.user_id for c in (*ranked.active, *ranked.offline)}
+            names = await _resolve_names(client, candidate_ids | {target_id})
+            stage2_view = render_reach_stage2(
+                target_id, ranked, requester_id=requester_id, names=names
+            )
             await client.views_update(view_id=view_id, view=stage2_view)
         except Exception as exc:
             log.exception("reach_stage1_submit error: %s", exc)

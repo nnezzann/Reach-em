@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 from reach_bot.handlers import register_handlers
-from reach_bot.ranking import RankedCandidates
+from reach_bot.ranking import Candidate, RankedCandidates
 
 
 class FakeSlackApp:
@@ -32,12 +32,16 @@ class FakeClient:
     def __init__(self) -> None:
         self.opened: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
+        self.profiles: dict[str, dict[str, Any]] = {}
 
     async def views_open(self, **kwargs: Any) -> None:
         self.opened.append(kwargs)
 
     async def views_update(self, **kwargs: Any) -> None:
         self.updated.append(kwargs)
+
+    async def users_info(self, *, user: str) -> dict[str, Any]:
+        return {"user": {"profile": self.profiles.get(user, {})}}
 
 
 class FakeRepository:
@@ -131,6 +135,40 @@ def test_target_selection_resolves_target_before_stage_two() -> None:
 
 
 
+
+
+def test_stage_two_shows_resolved_names_for_candidates_and_target() -> None:
+    def ranker(target_id: str, requester_id: str) -> RankedCandidates:
+        return RankedCandidates((Candidate("U-active", presence="active"),), ())
+
+    app, client = _register(ranker=ranker)
+    client.profiles["U-active"] = {"display_name": "Ada"}
+    client.profiles["U-target"] = {"display_name": "Grace"}
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["reach_stage1_submit"](
+            ack=ack,
+            body={"user": {"id": "U-requester"}},
+            view={
+                "id": "V1",
+                "state": {"values": {"target": {"target_user": {"selected_user": "U-target"}}}},
+            },
+            client=client,
+        )
+    )
+
+    stage2 = client.updated[0]["view"]
+    checkboxes = next(
+        block for block in stage2["blocks"] if block["element"]["type"] == "checkboxes"
+    )
+    assert checkboxes["element"]["options"][0]["text"]["text"] == "Ada"
+    message_input = next(
+        block for block in stage2["blocks"] if block["element"]["type"] == "plain_text_input"
+    )
+    assert message_input["element"]["initial_value"].startswith("Have you seen Grace?")
 
 
 def test_submission_rejects_missing_target_metadata() -> None:
