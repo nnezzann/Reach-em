@@ -165,7 +165,7 @@ def register_handlers(
                 errors={"manual_candidates": "Select at least one recipient."},
             )
             return
-        message = str(values["message"]["message"]["message_input"].get("value", "")).strip()
+        message = str(values["message"]["message_input"].get("value", "")).strip()
         if not message:
             await ack(
                 response_action="errors",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from types import SimpleNamespace
 from typing import Any
 
 from reach_bot.handlers import register_handlers
@@ -32,6 +34,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.opened: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
+        self.sent: list[dict[str, Any]] = []
         self.profiles: dict[str, dict[str, Any]] = {}
 
     async def views_open(self, **kwargs: Any) -> None:
@@ -43,6 +46,9 @@ class FakeClient:
     async def users_info(self, *, user: str) -> dict[str, Any]:
         return {"user": {"profile": self.profiles.get(user, {})}}
 
+    async def chat_postMessage(self, **kwargs: Any) -> None:
+        self.sent.append(kwargs)
+
 
 class FakeRepository:
     pass
@@ -51,12 +57,13 @@ class FakeRepository:
 def _register(
     *,
     ranker: Any = lambda _target, _requester: RankedCandidates((), ()),
+    repository: Any = None,
 ) -> tuple[FakeSlackApp, FakeClient]:
     app = FakeSlackApp()
     client = FakeClient()
     register_handlers(
         app,
-        repository=FakeRepository(),  # type: ignore[arg-type]
+        repository=repository or FakeRepository(),  # type: ignore[arg-type]
         ranker=ranker,
         renderer=lambda _ranked: [],
     )
@@ -193,3 +200,68 @@ def test_submission_rejects_missing_target_metadata() -> None:
             "errors": {"message": "Select who you are trying to reach first."},
         }
     ]
+
+
+def test_submission_sends_message_to_selected_recipients() -> None:
+    ping = SimpleNamespace(id="ping-1")
+    created: list[tuple[str, str, str, str]] = []
+
+    class Repo:
+        def create_reach_request(self, requester_id: str, target_id: str) -> Any:
+            return SimpleNamespace(id="request-1", requester_id=requester_id, target_id=target_id)
+
+        def create_ping(
+            self,
+            reach_request_id: str,
+            requester_id: str,
+            target_id: str,
+            candidate_id: str,
+            evidence: Any,
+            presence: str,
+        ) -> Any:
+            created.append((reach_request_id, requester_id, target_id, candidate_id))
+            return ping
+
+    def ranker(target_id: str, requester_id: str) -> RankedCandidates:
+        return RankedCandidates((Candidate("U-active", presence="active"),), ())
+
+    app, client = _register(ranker=ranker, repository=Repo())
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["reach_submit"](
+            ack=ack,
+            body={"user": {"id": "U-requester"}},
+            view={
+                "private_metadata": json.dumps(
+                    {"requester_id": "U-requester", "target_id": "U-target"}
+                ),
+                "state": {
+                    "values": {
+                        "suggested_active_now": {
+                            "suggested_candidates": {
+                                "selected_options": [{"value": "U-active"}]
+                            }
+                        },
+                        "message": {"message_input": {"value": "Anyone seen them?"}},
+                    }
+                },
+            },
+            client=client,
+        )
+    )
+
+    assert len(client.sent) == 1
+    text = client.sent[0]["text"]
+    assert "Reach, relaying for <@U-requester>" in text
+    assert "Anyone seen them?" in text
+    actions = client.sent[0]["blocks"][0]["elements"]
+    assert [element["action_id"] for element in actions] == [
+        "outcome_helped",
+        "outcome_unknown",
+        "outcome_more",
+    ]
+    assert json.loads(actions[0]["value"])["ping_id"] == "ping-1"
+    assert created == [("request-1", "U-requester", "U-target", "U-active")]
