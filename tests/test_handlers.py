@@ -255,7 +255,7 @@ def test_submission_sends_message_to_selected_recipients() -> None:
 
     assert len(client.sent) == 1
     text = client.sent[0]["text"]
-    assert "Reach, relaying for <@U-requester>" in text
+    assert "Reach, relaying for <@U-requester> about <@U-target>" in text
     assert "Anyone seen them?" in text
     actions = client.sent[0]["blocks"][0]["elements"]
     assert [element["action_id"] for element in actions] == [

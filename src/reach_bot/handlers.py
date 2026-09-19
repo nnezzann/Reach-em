@@ -190,7 +190,7 @@ def register_handlers(
             )
             await client.chat_postMessage(
                 channel=candidate_id,
-                text=f"Reach, relaying for <@{requester_id}>:\n{message}",
+                text=f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}",
                 blocks=[
                     render_recipient_actions(
                         ping_id=ping.id,
