@@ -229,15 +229,57 @@ three buttons.
   sent (hand-picked or via channel/workspace broadcast); broadcast
   recipients are never special-cased.
 
-## 7. Delivery Modes
+### 6.3 Per-recipient cleanup
 
-### 7.1 Default: bot-relay
+Every response type ("I know", "I don't know", "Custom message") triggers
+the same self-update behavior on the responder's own message:
+
+* After recording the response, the handler uses `chat.update` to remove
+  the `actions` block from that recipient's message and replace it with a
+  short thank-you line (e.g. "Thanks for your response!").
+* This cleanup uses the stored `channel` and `message_ts` from the ping
+  record, just like the threshold sweep does.
+* The thank-you formatting is shared across all three response types to
+  maintain visual consistency.
+
+The purpose of this cleanup is to give recipients immediate feedback that
+their response was registered, preventing confusion or duplicate responses.
+
+#### Duplicate-click guard
+
+All three response handlers check for an existing outcome before recording
+or applying cleanup:
+
+* If an outcome already exists for that ping (regardless of type), the
+  handler responds with a friendly ephemeral note and skips both recording
+  and cleanup.
+* This guard prevents double-recording and double-updating if a recipient
+  clicks a stale button or submits a modal multiple times.
+* The guard is type-agnostic: it checks for any response, not just the
+  specific type being submitted.
+
+#### Threshold sweep interaction
+
+When the three-response cutoff fires, the sweep that replaces open messages
+with the cutoff status must skip messages that have already been closed by
+ANY response type:
+
+* The sweep excludes pings that have ANY outcome recorded (not just "I
+  know").
+* This ensures that a message already closed via "I don't know" or "Custom
+  message" is not overwritten by the cutoff sweep.
+* The triggering responder's message is never double-updated because the
+  cutoff check happens before the self-update in the "I know" handler.
+
+## 8. Delivery Modes
+
+### 8.1 Default: bot-relay
 The message is sent from the bot's identity, clearly framed so the
 recipient understands who is actually asking and why (e.g. "Reach,
 relaying for @Niel: ..."). This requires no additional per-user setup and
 works for every requester by default.
 
-### 7.2 Opt-in: send as yourself
+### 8.2 Opt-in: send as yourself
 A requester can instead choose to have the message sent from their own
 Slack identity rather than the bot's. This requires:
 - A one-time per-user OAuth authorization (user token, distinct from the
@@ -248,7 +290,7 @@ Slack identity rather than the bot's. This requires:
   send via bot-relay automatically — this is never a blocking
   requirement to use `/reach`.
 
-### 7.3 Why this is opt-in, not default
+### 8.3 Why this is opt-in, not default
 Sending as the user requires a materially more sensitive credential (a
 user-scoped token capable of posting as that person generally, not just
 through this flow) and a real consent step. Bot-relay already conveys "who
@@ -257,7 +299,7 @@ it remains the default, and send-as-yourself is offered as a preference
 for requesters who specifically want the message to look and feel like it
 came directly from them.
 
-### 7.4 Settings tab requirements
+### 8.4 Settings tab requirements
 Accessible from the app's Home tab. Must show, at minimum:
 - Current delivery mode (bot-relay / send-as-yourself) with a toggle.
 - Connect/Disconnect action for the user token when relevant.
@@ -267,7 +309,7 @@ Accessible from the app's Home tab. Must show, at minimum:
 - Disconnecting immediately reverts the user to bot-relay for all future
   messages; it does not affect already-sent messages.
 
-## 8. Build Priority (v1 → v2)
+## 9. Build Priority (v1 → v2)
 
 **v1:**
 - Two-stage modal (`/reach` → target picker → suggested + manual +
@@ -285,7 +327,7 @@ Accessible from the app's Home tab. Must show, at minimum:
 - Send-as-yourself delivery mode + per-user OAuth flow + Settings tab.
 - "Why these people" opt-in detail view.
 
-## 9. Open Decisions
+## 10. Open Decisions
 
 - Tech stack: not yet locked (Node vs Python) — confirm before
   scaffolding.

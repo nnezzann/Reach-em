@@ -637,6 +637,48 @@ buttons.
 * The cutoff applies identically to hand-picked and broadcast recipients;
   broadcast recipients are never special-cased.
 
+### 7.6 Per-recipient cleanup
+
+Every response type ("I know", "I don't know", "Custom message") triggers
+the same self-update behavior on the responder's own message:
+
+* After recording the response, the handler uses `chat.update` to remove
+  the `actions` block from that recipient's message and replace it with a
+  short thank-you line (e.g. "Thanks for your response!").
+* This cleanup uses the stored `channel` and `message_ts` from the ping
+  record (§6.2), just like the threshold sweep does.
+* The thank-you formatting is shared across all three response types to
+  maintain visual consistency.
+
+The purpose of this cleanup is to give recipients immediate feedback that
+their response was registered, preventing confusion or duplicate responses.
+
+#### Duplicate-click guard
+
+All three response handlers check for an existing outcome before recording
+or applying cleanup:
+
+* If `get_outcome(ping_id)` returns any outcome (regardless of type),
+  the handler responds with a friendly ephemeral note (e.g. "You've already
+  responded to this — thanks!") and skips both recording and cleanup.
+* This guard prevents double-recording and double-updating if a recipient
+  clicks a stale button or submits a modal multiple times.
+* The guard is type-agnostic: it checks for any response, not just the
+  specific type being submitted.
+
+#### Threshold sweep interaction
+
+When the three-response cutoff fires (§7.5), the sweep that replaces open
+messages with the cutoff status must skip messages that have already been
+closed by ANY response type:
+
+* The sweep uses `get_unresponded_pings(reach_request_id)`, which now
+  excludes pings that have ANY outcome recorded (not just "I know").
+* This ensures that a message already closed via "I don't know" or "Custom
+  message" is not overwritten by the cutoff sweep.
+* The triggering responder's message is never double-updated because the
+  cutoff check happens before the self-update in the "I know" handler.
+
 ---
 
 ## 8. Delivery Modes
