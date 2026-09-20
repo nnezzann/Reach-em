@@ -1,0 +1,34 @@
+# Render blueprint for the Reach bot — free tier.
+#
+# type: web is REQUIRED on the free plan: Render does not offer a
+# Background Worker tier there, and the process must stay alive to hold
+# the Socket Mode connection. A Web Service in turn must bind $PORT and
+# answer HTTP, which is why the app runs a minimal /health server
+# alongside the Socket Mode handler (src/reach_bot/app.py; see the
+# Deployment section of AGENTS.md / README.md for the full rationale and
+# the keep-alive tradeoffs).
+services:
+  - type: web
+    name: reach-em
+    runtime: python
+    plan: free
+    # The project is managed with uv (pyproject.toml + uv.lock), same as
+    # local development; builds run from the repo root.
+    buildCommand: "uv sync"
+    # ONE process runs BOTH the Socket Mode handler and the /health
+    # server together (src/reach_bot/app.py main() via asyncio.gather) —
+    # not just one of them. Socket Mode stays the sole Slack event path;
+    # the health server carries no Slack traffic.
+    startCommand: "uv run python app.py"
+    # Render's own service-level health check (separate from the GitHub
+    # Actions keep-alive ping in .github/workflows/keep-alive.yml).
+    healthCheckPath: /health
+    envVars:
+      # Declared only, with no values: set these as secrets in the Render
+      # dashboard. Never commit real tokens/connection strings to the
+      # repo or to this file. SLACK_SIGNING_SECRET is intentionally NOT
+      # declared — it only applies to HTTP-mode request verification,
+      # which this deployment does not use. PORT is set by Render itself.
+      - key: SLACK_BOT_TOKEN
+      - key: SLACK_APP_TOKEN
+      - key: DATABASE_URL

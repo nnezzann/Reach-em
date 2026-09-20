@@ -9,14 +9,15 @@ description = "A Slack bot that helps people reach the smallest useful audience.
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # aiohttp is also the transport Slack's Socket Mode adapter uses; the
+    # health server reuses it so the Render keep-alive needs no extra web
+    # framework (FastAPI/uvicorn were dropped with the rejected HTTP mode).
     "aiohttp>=3.10,<4",
-    "fastapi>=0.115,<1",
     "pydantic-settings>=2.6,<3",
     "psycopg[binary]>=3.2,<4",
     "redis>=5.2,<6",
     "slack-cli-hooks<1.0.0",
     "slack-bolt>=1.21,<2",
-    "uvicorn[standard]>=0.30,<1",
 ]
 
 [project.optional-dependencies]

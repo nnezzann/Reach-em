@@ -5,8 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     slack_bot_token: str
-    slack_app_token: str | None = None
-    slack_signing_secret: str | None = None
+    # Socket Mode is the only Slack transport for this deployment, so the
+    # xapp- app-level token is required (no SLACK_SIGNING_SECRET: that only
+    # applies to HTTP-mode request verification, which is not used).
+    slack_app_token: str
     database_url: str | None = None
     redis_url: str | None = None
     host: str = "0.0.0.0"

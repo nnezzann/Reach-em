@@ -97,21 +97,16 @@ REDIS_URL=redis://localhost:6379
 
 ### Running the Bot
 
-For local development with Socket Mode:
+Run the app (Socket Mode handler + health server, in one process):
 
 ```bash
 uv run python app.py
 ```
 
-The bot will connect to Slack via Socket Mode and respond to `/reach` commands.
-
-For production deployments using HTTP mode (no Socket Mode):
-
-```bash
-uv run uvicorn reach_bot.app:api --host 0.0.0.0 --port 8000
-```
-
-In HTTP mode, configure Slack request URLs for `/slack/events` and set `SLACK_SIGNING_SECRET` in your environment.
+The bot will connect to Slack via Socket Mode and respond to `/reach` commands. The
+health server listens on `0.0.0.0:$PORT` (default 8000) and serves only `GET /health`;
+it carries no Slack traffic and exists for Render's health check and the keep-alive ping
+(see [Deployment](#deployment)).
 
 ### Testing
 
@@ -149,12 +144,108 @@ The ranking/suggestion machinery is currently dormant; the bot uses manual recip
 
 ## Deployment
 
-For production deployment:
+The bot is deployed as a **Render free-tier Web Service** that talks to Slack entirely
+over **Socket Mode** (HTTP mode / Slack Request URLs were considered and explicitly
+rejected — there is no webhook endpoint and no `SLACK_SIGNING_SECRET` anywhere in this
+deployment).
 
-1. Set `DATABASE_URL` and `REDIS_URL` environment variables
-2. Choose between Socket Mode (easier, no public endpoint) or HTTP mode (requires public URL)
-3. Configure your deployment to restart automatically on crashes
-4. Ensure PostgreSQL and Redis are available and properly configured
-5. Apply database migrations from `src/reach_bot/migrations/`
+### Why a Web Service, not a Background Worker
 
-PostgreSQL migrations are versioned and should be applied in order.
+Render's free plan does not offer Background Workers, so the long-lived Socket Mode
+process must be deployed as `type: web`. A Web Service has to bind `$PORT` and answer
+HTTP requests to stay up, which is the *only* reason any HTTP server exists in this
+project:
+
+- the **Socket Mode handler** — the sole Slack event path (unchanged), and
+- a **minimal `aiohttp` health server** exposing `GET /health` → `200 {"status": "ok"}`
+  on `0.0.0.0:$PORT` (`PORT` is set by Render and read from the environment, never
+  hardcoded). It carries no Slack traffic and needs no signature verification — it
+  exists purely for Render's service-level health check and the keep-alive ping below.
+
+Both run concurrently in the same process (`asyncio.gather` in `src/reach_bot/app.py`),
+and Render restarts the service automatically on crashes.
+
+### `render.yaml`
+
+```yaml
+services:
+  - type: web
+    name: reach-em
+    runtime: python
+    plan: free
+    buildCommand: "uv sync"
+    startCommand: "uv run python app.py"
+    healthCheckPath: /health
+    envVars:
+      - key: SLACK_BOT_TOKEN
+      - key: SLACK_APP_TOKEN
+      - key: DATABASE_URL
+```
+
+The project is managed with `uv` (`pyproject.toml` + `uv.lock`), so the build uses
+`uv sync` (no dev extras in the deployed image). The start command launches the single
+process that runs **both** the Socket Mode handler and the health server.
+
+### Environment variables
+
+Set these as **secrets in the Render dashboard** — never in the repo or in
+`render.yaml`:
+
+| Variable | Purpose |
+| --- | --- |
+| `SLACK_BOT_TOKEN` | Bot token (`xoxb-…`) |
+| `SLACK_APP_TOKEN` | App-level token (`xapp-…`) for the Socket Mode connection — still required here, unlike an HTTP-mode deployment |
+| `DATABASE_URL` | Supabase/Postgres connection string |
+
+`PORT` is set automatically by Render. `REDIS_URL` remains optional (used only by the
+dormant presence cache). `SLACK_SIGNING_SECRET` is **not** needed — it applies only to
+HTTP-mode request verification.
+
+### Keep-alive (GitHub Actions)
+
+Render's free tier spins idle web services down after ~15 minutes of inactivity, and
+Render does not officially support pinging to prevent that. So
+`.github/workflows/keep-alive.yml` pings `${RENDER_APP_URL}/health` with `curl -f`
+every 10 minutes, failing the run on anything other than 200.
+
+1. Set `RENDER_APP_URL` as a **repo variable** in the GitHub repository's
+   *Settings → Variables* (a plain, non-sensitive URL — hence a variable, not a
+   secret).
+2. The cron is `*/10 2-21 * * *` — every 10 minutes, but only 02:00–21:59 UTC. GitHub
+   Actions cron always runs in UTC, and the 10-minute cadence is deliberately tighter
+   than Render's ~15-minute idle window to leave margin for Actions' scheduling
+   jitter.
+3. **Why the quiet window:** the free plan caps usage at 750 total instance-hours per
+   month; pinging 24/7 would burn nearly the entire budget on keep-alive traffic alone.
+   The excluded hours (22:00–01:59 UTC) map to 00:00–04:00 in the app owner's local
+   timezone (UTC+2) — local 00:00–04:00 at UTC+2 is 22:00–02:00 UTC. If that timezone
+   or the quiet hours ever change, redo the UTC+2 → UTC conversion before touching the
+   cron hours.
+4. **Why uptime matters here:** besides slow first responses after a spin-down, a
+   spin-down silently kills any in-flight background broadcast fan-out (it is an
+   in-process `asyncio` task), so recipients mid-fan-out would never be pinged with no
+   visible error.
+5. **Accepted tradeoff (deliberate, not a bug):** during 00:00–04:00 local time the app
+   *will* be allowed to spin down, so a real `/reach` in that window pays a cold start
+   (tens of seconds) on its first request instead of an instant response. This is a
+   deliberate cost/uptime tradeoff for the free tier — revisit it if it matters in
+   practice (narrow the quiet window, or move off the free tier).
+
+### Reconnection
+
+No custom reconnection logic is needed: Bolt's `AsyncSocketModeHandler` reconnects
+automatically when the process restarts or the container wakes from a Render idle
+cycle — look for a fresh "session established" log line after each cold start.
+
+### Database migrations
+
+Apply `src/reach_bot/migrations/` against the Supabase/Postgres database in order
+(`001_initial.sql`, then `002_response_limit.sql`). Migrations are versioned SQL and
+there is no in-app migration runner.
+
+### Positioning
+
+The health server plus keep-alive setup is a **free-tier workaround, not a permanent
+architectural stance.** On a paid tier a proper Background Worker (or the
+earlier-considered Oracle Cloud VM path) would make the health server and the
+keep-alive ping unnecessary, and the app would run as a plain Socket Mode process.

@@ -336,3 +336,114 @@ Accessible from the app's Home tab. Must show, at minimum:
 - Whether "I know" should always prompt for a location/detail reply, or
   just log a positive outcome silently — leaning toward prompting, since
   the detail is the actually useful part for the requester, but confirm.
+
+## 11. Deployment (Render free tier)
+
+Deployment target: a **Render free-tier Web Service**, with **Socket Mode
+as the sole Slack transport**. HTTP mode (Slack's Request-URL / event-
+verification flow, `SLACK_SIGNING_SECRET`) was considered and explicitly
+rejected: Slack talks to the app entirely over the existing Socket Mode
+connection, and no public webhook endpoint is involved.
+
+### 11.1 Why a Web Service, not a Background Worker
+
+Render's free plan does not offer Background Workers. A long-lived
+process whose only job is holding a Socket Mode connection is therefore
+undeployable on the free tier, so the service is declared `type: web` in
+`render.yaml` (on a paid tier a proper Background Worker would be the
+right shape). A Web Service must bind `$PORT` and answer HTTP requests
+to stay up — that is the *only* reason any HTTP server exists in this
+project.
+
+### 11.2 Health server alongside Socket Mode
+
+`src/reach_bot/app.py` boots two things concurrently in one process, via
+`asyncio.gather()`:
+
+- The existing `AsyncSocketModeHandler` — unchanged, and still the only
+  path by which Slack events reach the app.
+- A minimal `aiohttp` server bound to `0.0.0.0` on the `PORT` env var
+  (set by Render; never hardcoded), exposing a single `GET /health`
+  route that returns `200 {"status": "ok"}`.
+
+The health server carries no Slack traffic, needs no Slack signature
+verification, and is not part of Bolt's request flow — it exists purely
+so Render's service-level health check and the external keep-alive ping
+(§11.4) have something to hit. It is free-tier plumbing, not
+application surface.
+
+### 11.3 Environment variables
+
+Required, set as secrets in the Render dashboard and never committed to
+the repo or `render.yaml`:
+
+- `SLACK_BOT_TOKEN` (`xoxb-…`) — the bot token.
+- `SLACK_APP_TOKEN` (`xapp-…`) — the app-level token for Socket Mode.
+  Still required in this deployment (unlike an HTTP-mode deployment, it
+  is not optional here — it authenticates the Socket Mode connection
+  itself).
+- `DATABASE_URL` — Supabase/Postgres connection string, read exactly as
+  before (`Settings.database_url` → `PostgresRepository`;
+  falls back to the in-memory repository when unset).
+
+`SLACK_SIGNING_SECRET` is **not** needed: it only applies to HTTP-mode
+request verification, which this deployment does not use. `PORT` is set
+automatically by Render.
+
+### 11.4 GitHub Actions keep-alive
+
+`.github/workflows/keep-alive.yml` pings `${RENDER_APP_URL}/health`
+(`RENDER_APP_URL` is a repo variable, not a secret, since the app URL is
+not sensitive) with `curl -f` on a `*/10 2-21 * * *` cron — every 10
+minutes, but only during 02:00–21:59 UTC. A non-200 or failed ping fails
+the workflow run so keep-alive breakage is visible in the Actions tab.
+
+- **Cadence:** the 10-minute interval is deliberately tighter than
+  Render's ~15-minute free-tier idle window, leaving margin for GitHub
+  Actions' own scheduling jitter (cron is not guaranteed to fire exactly
+  on time).
+- **Quiet window and timezone basis:** GitHub Actions cron is always
+  evaluated in UTC. The excluded hours (22:00–01:59 UTC) correspond to
+  00:00–04:00 in the app owner's local timezone (UTC+2). Conversion
+  basis: local 00:00–04:00 at UTC+2 equals 22:00–02:00 UTC, so active
+  pinging covers 02:00–22:00 UTC — exactly the `2-21` cron hour range.
+  Anyone changing the owner's timezone or the desired quiet hours must
+  redo that UTC+2 → UTC conversion rather than editing the cron hours by
+  feel.
+- **Why the quiet window exists at all:** Render's free plan caps usage
+  at 750 total instance-hours per month. Pinging continuously 24/7 would
+  consume nearly all of that budget on keep-alive traffic alone (~720
+  instance-hours in a 30-day month, ~744 in a 31-day month), leaving no
+  margin. The ~4-hour daily quiet window keeps monthly usage comfortably
+  under the cap (~600–620 instance-hours/month).
+- **Relationship to the broadcast fan-out:** this is an *unofficial*
+  workaround — Render does not officially support pinging to avoid
+  idle spin-down. Uptime matters beyond just avoiding slow responses:
+  a spin-down also **silently kills any in-flight background broadcast
+  fan-out task** (the fan-out is an in-process `asyncio` task per the
+  core flow in §3), so recipients mid-fan-out would never be pinged and
+  no error would be visible anywhere.
+- **Accepted tradeoff (deliberate, not a bug):** during the 00:00–04:00
+  local quiet window the app *will* be allowed to spin down, so any real
+  Slack interaction in that window hits a cold start (tens of seconds)
+  on its first request rather than an instant response. This is a
+  deliberate cost/uptime tradeoff for staying on the free tier. Flag to
+  revisit if the cold-start window turns out to matter in practice:
+  narrow the quiet window, or move off the free tier (§11.6).
+
+### 11.5 Reconnection
+
+Bolt's `AsyncSocketModeHandler` already reconnects automatically when
+the underlying process restarts or the container wakes from a Render
+idle cycle — a fresh "session established" log line appears on every
+process start, and this has been observed working. **Verify, don't
+rebuild:** no custom reconnection/retry logic is layered on top of it.
+
+### 11.6 Positioning: free-tier workaround, not a stance
+
+All of §11 — the health server, the keep-alive cron, the accepted
+cold-start window — is a **free-tier workaround rather than a permanent
+architectural stance.** If the project ever moves to a paid tier where a
+proper Background Worker is available, or to the earlier-considered
+Oracle Cloud VM path, the health server and the keep-alive machinery can
+be removed entirely and the app runs as a plain Socket Mode process.

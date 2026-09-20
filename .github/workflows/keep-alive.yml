@@ -1,0 +1,67 @@
+# Keep-alive ping for the Render free-tier deployment.
+#
+# WHY THIS EXISTS
+# Render's free plan spins a web service down after ~15 minutes of
+# inactivity. A spin-down would (a) make the next real Slack interaction
+# pay a cold start of tens of seconds, and (b) SILENTLY KILL any in-flight
+# background broadcast fan-out task — the fan-out is an in-process
+# asyncio task (src/reach_bot/broadcast.py), so the process dying takes
+# the fan-out with it and recipients mid-fan-out are never pinged with no
+# visible error. This workflow pings /health often enough that the
+# service stays awake during the hours it is likely to be used.
+#
+# NOTE: this is an UNOFFICIAL workaround — Render does not officially
+# support keep-alive pinging to avoid idle spin-down on the free tier.
+#
+# WHY THIS WINDOW
+# GitHub Actions cron is always evaluated in UTC. "*/10 2-21 * * *" pings
+# every 10 minutes during 02:00–21:59 UTC. The 10-minute cadence is
+# deliberately tighter than Render's ~15-minute idle window, leaving
+# margin for GitHub Actions' own scheduling jitter (cron is not
+# guaranteed to fire exactly on time).
+#
+# The excluded hours (22:00–01:59 UTC) are a deliberate quiet window:
+# 00:00–04:00 in the app owner's local timezone (UTC+2).
+# CONVERSION BASIS: local 00:00–04:00 at UTC+2 == 22:00–02:00 UTC, so
+# active pinging covers 02:00–22:00 UTC, which is exactly the "2-21" cron
+# hour range below. If the owner's timezone or the desired quiet hours
+# ever change, REDO THIS UTC+2 → UTC CONVERSION rather than editing the
+# cron hours by feel.
+#
+# COST RATIONALE: Render's free plan caps usage at 750 total
+# instance-hours per month. Pinging continuously 24/7 would consume
+# nearly all of that budget on keep-alive traffic alone (~720
+# instance-hours in a 30-day month, ~744 in a 31-day month), leaving no
+# margin. The ~4-hour daily quiet window keeps monthly usage comfortably
+# under the cap (~600–620 instance-hours/month).
+#
+# ACCEPTED TRADEOFF (deliberate, not a bug): during the 00:00–04:00 local
+# quiet window the app WILL be allowed to spin down, so any real Slack
+# interaction in that window will hit a cold start (tens of seconds) on
+# its first request rather than an instant response. This is a deliberate
+# cost/uptime tradeoff for staying on the free tier. Revisit if it matters
+# in practice: narrow the quiet window, or move off the free tier (a paid
+# Background Worker would make this whole workaround unnecessary — see
+# the Deployment section of AGENTS.md / README.md).
+#
+# RENDER_APP_URL is a repo variable (Settings → Variables), not a secret:
+# it is the public app URL, not sensitive material.
+
+name: keep-alive
+
+on:
+  schedule:
+    - cron: "*/10 2-21 * * *"
+  # Manual runs: verify the ping works, or wake the service on demand.
+  workflow_dispatch:
+
+jobs:
+  ping-health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render /health
+        run: |
+          # -f fails the step on any HTTP error (>=400) or failed
+          # connection, so a ping that does not return 200 shows up as a
+          # failed run in the Actions tab.
+          curl -fsS --max-time 30 "${{ vars.RENDER_APP_URL }}/health"
