@@ -29,6 +29,7 @@
         "commands",
         "chat:write",
         "channels:read",
+        "groups:read",
         "users:read",
         "im:write",
         "im:history"
