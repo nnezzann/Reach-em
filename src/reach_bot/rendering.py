@@ -7,6 +7,7 @@ from reach_bot.ranking import Candidate, RankedCandidates
 
 DEFAULT_MESSAGE = "Do you know where they are or how to reach them?"
 CUTOFF_STATUS = "Someone already confirmed a location for this — thanks!"
+THANK_YOU_STATUS = "Thanks for your response!"
 
 
 def mrkdwn_section(text: str) -> dict[str, Any]:

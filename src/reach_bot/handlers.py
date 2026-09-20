@@ -15,6 +15,7 @@ from reach_bot.broadcast import fan_out_broadcast
 from reach_bot.persistence import Ping, PingOutcome, ReachRepository
 from reach_bot.rendering import (
     CUTOFF_STATUS,
+    THANK_YOU_STATUS,
     mrkdwn_section,
     render_location_modal,
     render_ping_modal,
@@ -320,10 +321,30 @@ def register_handlers(
 
     @slack_app.action("outcome_unknown")  # type: ignore[untyped-decorator]
     async def outcome_unknown(
-        ack: Callable[..., Awaitable[None]], body: dict[str, Any]
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
     ) -> None:
         await ack()
-        await _record_outcome(body, repository, "unknown")
+        action = body.get("actions", [{}])[0]
+        value = decode_action_value(action.get("value", "{}"))
+        ping_id = value.get("ping_id")
+        if not ping_id:
+            return
+        ping = repository.get_ping(ping_id)
+        if ping is None:
+            log.warning("outcome_unknown received unknown ping_id=%s", ping_id)
+            return
+        # Duplicate-click guard: check for any existing outcome
+        if repository.get_outcome(ping_id) is not None:
+            try:
+                await client.chat_postMessage(
+                    channel=ping.candidate_id,
+                    text="You've already responded to this — thanks!",
+                )
+            except SlackApiError as exc:
+                log.error("ephemeral note failed for ping=%s: %s", ping_id, exc)
+            return
+        repository.record_outcome(PingOutcome(ping_id, "unknown"))
+        await _apply_response_cleanup(client, ping)
 
     @slack_app.action("outcome_more")  # type: ignore[untyped-decorator]
     async def outcome_more(
@@ -347,11 +368,22 @@ def register_handlers(
         if ping is None:
             log.warning("reply_more received unknown ping_id=%s", ping_id)
             return
+        # Duplicate-click guard: check for any existing outcome
+        if repository.get_outcome(ping_id) is not None:
+            try:
+                await client.chat_postMessage(
+                    channel=ping.candidate_id,
+                    text="You've already responded to this — thanks!",
+                )
+            except SlackApiError as exc:
+                log.error("ephemeral note failed for ping=%s: %s", ping_id, exc)
+            return
         repository.record_outcome(PingOutcome(ping_id, "replied"))
         await client.chat_postMessage(
             channel=ping.requester_id,
             text=f"Reply from Reach recipient:\n{reply}",
         )
+        await _apply_response_cleanup(client, ping)
 
     @slack_app.view("location_submit")  # type: ignore[untyped-decorator]
     async def location_submit(
@@ -393,6 +425,7 @@ def register_handlers(
                     f"<@{ping.target_id}>: {location}"
                 ),
             )
+        await _apply_response_cleanup(client, ping)
         if count == known_response_limit:
             await _sweep_open_messages(repository, client, ping)
 
@@ -407,6 +440,16 @@ async def _replace_with_cutoff_status(client: Any, ping: Ping) -> None:
         log.error("chat_update cutoff status failed for ping=%s: %s", ping.id, exc)
 
 
+async def _apply_response_cleanup(client: Any, ping: Ping) -> None:
+    """Remove the actions block from a recipient's message and show a thank-you line."""
+    if not ping.message_ts:
+        return
+    try:
+        await client.chat_update(channel=ping.channel, ts=ping.message_ts, text=THANK_YOU_STATUS)
+    except SlackApiError as exc:
+        log.error("chat_update cleanup failed for ping=%s: %s", ping.id, exc)
+
+
 async def _sweep_open_messages(
     repository: ReachRepository, client: Any, responded_ping: Ping
 ) -> None:
@@ -419,10 +462,3 @@ async def _sweep_open_messages(
             await client.chat_update(channel=other.channel, ts=other.message_ts, text=CUTOFF_STATUS)
         except SlackApiError as exc:
             log.error("chat_update cutoff sweep failed for ping=%s: %s", other.id, exc)
-
-
-async def _record_outcome(body: dict[str, Any], repository: ReachRepository, outcome: str) -> None:
-    action = body.get("actions", [{}])[0]
-    value = decode_action_value(action.get("value", "{}"))
-    if "ping_id" in value:
-        repository.record_outcome(PingOutcome(value["ping_id"], outcome))
