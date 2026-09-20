@@ -5,9 +5,11 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+import reach_bot.handlers
 from reach_bot.handlers import register_handlers
 from reach_bot.persistence import PingOutcome
-from reach_bot.ranking import Candidate, RankedCandidates
 from reach_bot.rendering import CUTOFF_STATUS
 
 
@@ -39,6 +41,8 @@ class FakeClient:
         self.sent: list[dict[str, Any]] = []
         self.message_updates: list[dict[str, Any]] = []
         self.profiles: dict[str, dict[str, Any]] = {}
+        self.channel_members: dict[str, list[str]] = {}
+        self.workspace_users: list[dict[str, Any]] = []
 
     async def views_open(self, **kwargs: Any) -> None:
         self.opened.append(kwargs)
@@ -48,6 +52,12 @@ class FakeClient:
 
     async def users_info(self, *, user: str) -> dict[str, Any]:
         return {"user": {"profile": self.profiles.get(user, {})}}
+
+    async def conversations_members(self, **kwargs: Any) -> dict[str, Any]:
+        return {"members": self.channel_members.get(str(kwargs.get("channel")), [])}
+
+    async def users_list(self, **kwargs: Any) -> dict[str, Any]:
+        return {"users": self.workspace_users}
 
     async def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:
         self.sent.append(kwargs)
@@ -61,18 +71,12 @@ class FakeRepository:
     pass
 
 
-def _register(
-    *,
-    ranker: Any = lambda _target, _requester: RankedCandidates((), ()),
-    repository: Any = None,
-) -> tuple[FakeSlackApp, FakeClient]:
+def _register(*, repository: Any = None) -> tuple[FakeSlackApp, FakeClient]:
     app = FakeSlackApp()
     client = FakeClient()
     register_handlers(
         app,
         repository=repository or FakeRepository(),  # type: ignore[arg-type]
-        ranker=ranker,
-        renderer=lambda _ranked: [],
     )
     return app, client
 
@@ -104,63 +108,14 @@ def test_bare_reach_command_opens_initial_modal() -> None:
     assert client.opened[0]["view"]["blocks"][0]["element"]["action_id"] == "target_user"
 
 
-def test_target_selection_resolves_target_before_stage_two() -> None:
-    ranked_for: list[tuple[str, str]] = []
+def test_target_selection_renders_stage_two_inside_the_ack() -> None:
     acknowledgements: list[dict[str, Any]] = []
 
-    def ranker(target_id: str, requester_id: str) -> RankedCandidates:
-        ranked_for.append((target_id, requester_id))
-        return RankedCandidates((), ())
-
-    app, client = _register(ranker=ranker)
-
-    async def ack(**kwargs: Any) -> None:
-        acknowledgements.append(kwargs)
-
-    asyncio.run(
-        app.handlers["reach_stage1_submit"](
-            ack=ack,
-            body={"user": {"id": "U-requester"}},
-            view={
-                "id": "V1",
-                "hash": "H1",
-                "state": {
-                    "values": {
-                        "target": {"target_user": {"selected_user": "U-target"}}
-                    }
-                },
-            },
-            client=client,
-        )
-    )
-
-    assert ranked_for == [("U-target", "U-requester")]
-    assert len(acknowledgements) == 1
-    update_ack = acknowledgements[0]
-    assert update_ack["response_action"] == "update"
-    assert update_ack["view"]["callback_id"] == "reach_stage1_submit"
-    assert "Finding the best people" in update_ack["view"]["blocks"][0]["text"]["text"]
-    assert client.updated[0]["view_id"] == "V1"
-    assert client.updated[0]["view"]["callback_id"] == "reach_submit"
-    assert '"target_id":"U-target"' in client.updated[0]["view"]["private_metadata"]
-
-
-
-
-
-
-
-
-def test_stage_two_shows_resolved_names_for_candidates_and_target() -> None:
-    def ranker(target_id: str, requester_id: str) -> RankedCandidates:
-        return RankedCandidates((Candidate("U-active", presence="active"),), ())
-
-    app, client = _register(ranker=ranker)
-    client.profiles["U-active"] = {"display_name": "Ada"}
+    app, client = _register()
     client.profiles["U-target"] = {"display_name": "Grace"}
 
     async def ack(**kwargs: Any) -> None:
-        pass
+        acknowledgements.append(kwargs)
 
     asyncio.run(
         app.handlers["reach_stage1_submit"](
@@ -174,15 +129,23 @@ def test_stage_two_shows_resolved_names_for_candidates_and_target() -> None:
         )
     )
 
-    stage2 = client.updated[0]["view"]
-    checkboxes = next(
-        block for block in stage2["blocks"] if block["element"]["type"] == "checkboxes"
-    )
-    assert checkboxes["element"]["options"][0]["text"]["text"] == "Ada"
-    message_input = next(
-        block for block in stage2["blocks"] if block["element"]["type"] == "plain_text_input"
-    )
-    assert message_input["element"]["initial_value"].startswith("Have you seen Grace?")
+    assert len(acknowledgements) == 1
+    update_ack = acknowledgements[0]
+    assert update_ack["response_action"] == "update"
+    view = update_ack["view"]
+    assert view["callback_id"] == "reach_submit"
+    assert '"target_id":"U-target"' in view["private_metadata"]
+    assert '"target_name":"Grace"' in view["private_metadata"]
+    # No loading view, no separate views_update round trip.
+    assert "Finding the best people" not in json.dumps(view)
+    assert client.updated == []
+    assert [block["block_id"] for block in view["blocks"]] == [
+        "candidates",
+        "broadcast_scope",
+        "message",
+    ]
+    message = next(block for block in view["blocks"] if block["block_id"] == "message")
+    assert message["element"]["initial_value"].startswith("Have you seen Grace?")
 
 
 def test_submission_rejects_missing_target_metadata() -> None:
@@ -212,6 +175,7 @@ def test_submission_rejects_missing_target_metadata() -> None:
 def test_submission_sends_message_to_selected_recipients() -> None:
     ping = SimpleNamespace(id="ping-1")
     created: list[tuple[str, str, str, str]] = []
+    contexts: list[Any] = []
     deliveries: list[tuple[str, str, str]] = []
 
     class Repo:
@@ -224,19 +188,17 @@ def test_submission_sends_message_to_selected_recipients() -> None:
             requester_id: str,
             target_id: str,
             candidate_id: str,
-            evidence: Any,
+            channel_context: Any,
             presence: str,
         ) -> Any:
             created.append((reach_request_id, requester_id, target_id, candidate_id))
+            contexts.append(channel_context)
             return ping
 
         def set_ping_delivery(self, ping_id: str, channel: str, message_ts: str) -> None:
             deliveries.append((ping_id, channel, message_ts))
 
-    def ranker(target_id: str, requester_id: str) -> RankedCandidates:
-        return RankedCandidates((Candidate("U-active", presence="active"),), ())
-
-    app, client = _register(ranker=ranker, repository=Repo())
+    app, client = _register(repository=Repo())
 
     async def ack(**kwargs: Any) -> None:
         pass
@@ -251,10 +213,9 @@ def test_submission_sends_message_to_selected_recipients() -> None:
                 ),
                 "state": {
                     "values": {
-                        "suggested_active_now": {
-                            "suggested_candidates": {
-                                "selected_options": [{"value": "U-active"}]
-                            }
+                        "candidates": {"candidates": {"selected_users": ["U-active"]}},
+                        "broadcast_scope": {
+                            "scope_choice": {"selected_option": {"value": "none"}}
                         },
                         "message": {"message_input": {"value": "Anyone seen them?"}},
                     }
@@ -277,7 +238,294 @@ def test_submission_sends_message_to_selected_recipients() -> None:
     ]
     assert json.loads(actions[0]["value"])["ping_id"] == "ping-1"
     assert created == [("request-1", "U-requester", "U-target", "U-active")]
+    # Suggestions are dormant: no computed channel context is stored.
+    assert contexts == [None]
     assert deliveries == [("ping-1", "U-active", "1.0001")]
+    assert not reach_bot.handlers._background_tasks
+
+
+def test_submission_rejects_empty_candidates_with_none_scope() -> None:
+    app, _client = _register()
+    acknowledgements: list[dict[str, Any]] = []
+
+    async def ack(**kwargs: Any) -> None:
+        acknowledgements.append(kwargs)
+
+    asyncio.run(
+        app.handlers["reach_submit"](
+            ack=ack,
+            body={"user": {"id": "U-requester"}},
+            view={
+                "private_metadata": json.dumps(
+                    {"requester_id": "U-requester", "target_id": "U-target"}
+                ),
+                "state": {
+                    "values": {
+                        "candidates": {"candidates": {"selected_users": []}},
+                        "broadcast_scope": {
+                            "scope_choice": {"selected_option": {"value": "none"}}
+                        },
+                        "message": {"message_input": {"value": "Anyone seen them?"}},
+                    }
+                },
+            },
+            client=FakeClient(),
+        )
+    )
+
+    assert acknowledgements == [
+        {
+            "response_action": "errors",
+            "errors": {
+                "candidates": "Pick at least one person, or choose a broadcast option below."
+            },
+        }
+    ]
+
+
+def test_submission_requires_channel_for_channel_scope() -> None:
+    app, _client = _register()
+    acknowledgements: list[dict[str, Any]] = []
+
+    async def ack(**kwargs: Any) -> None:
+        acknowledgements.append(kwargs)
+
+    asyncio.run(
+        app.handlers["reach_submit"](
+            ack=ack,
+            body={"user": {"id": "U-requester"}},
+            view={
+                "private_metadata": json.dumps(
+                    {"requester_id": "U-requester", "target_id": "U-target"}
+                ),
+                "state": {
+                    "values": {
+                        "candidates": {"candidates": {"selected_users": []}},
+                        "broadcast_scope": {
+                            "scope_choice": {"selected_option": {"value": "channel"}}
+                        },
+                        "message": {"message_input": {"value": "Anyone seen them?"}},
+                    }
+                },
+            },
+            client=FakeClient(),
+        )
+    )
+
+    assert acknowledgements == [
+        {"response_action": "errors", "errors": {"broadcast_channel": "Pick a channel."}}
+    ]
+
+
+def test_scope_choice_adds_channel_picker_and_preserves_input() -> None:
+    app, client = _register()
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["scope_choice"](
+            ack=ack,
+            body={
+                "view": {
+                    "id": "V1",
+                    "private_metadata": json.dumps(
+                        {
+                            "requester_id": "U-requester",
+                            "target_id": "U-target",
+                            "target_name": "Grace",
+                        }
+                    ),
+                    "state": {
+                        "values": {
+                            "candidates": {"candidates": {"selected_users": ["U-friend"]}},
+                            "broadcast_scope": {
+                                "scope_choice": {"selected_option": {"value": "channel"}}
+                            },
+                            "message": {"message_input": {"value": "Edited message"}},
+                        }
+                    },
+                }
+            },
+            client=client,
+        )
+    )
+
+    assert client.updated[0]["view_id"] == "V1"
+    blocks = client.updated[0]["view"]["blocks"]
+    assert [block["block_id"] for block in blocks] == [
+        "candidates",
+        "broadcast_scope",
+        "broadcast_channel",
+        "message",
+    ]
+    assert blocks[0]["element"]["initial_users"] == ["U-friend"]
+    assert blocks[1]["element"]["initial_option"]["value"] == "channel"
+    assert blocks[2]["element"]["type"] == "conversations_select"
+    assert blocks[2]["element"]["filter"]["include"] == ["public", "private"]
+    assert "initial_conversation" not in blocks[2]["element"]
+    assert blocks[3]["element"]["initial_value"] == "Edited message"
+
+
+def test_scope_choice_keeps_picked_channel_on_rerender() -> None:
+    app, client = _register()
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["scope_choice"](
+            ack=ack,
+            body={
+                "view": {
+                    "id": "V1",
+                    "private_metadata": json.dumps(
+                        {
+                            "requester_id": "U-requester",
+                            "target_id": "U-target",
+                            "target_name": "Grace",
+                        }
+                    ),
+                    "state": {
+                        "values": {
+                            "candidates": {"candidates": {"selected_users": []}},
+                            "broadcast_scope": {
+                                "scope_choice": {"selected_option": {"value": "channel"}}
+                            },
+                            "broadcast_channel": {
+                                "channel_choice": {"selected_conversation": "C1"}
+                            },
+                            "message": {"message_input": {"value": "Edited message"}},
+                        }
+                    },
+                }
+            },
+            client=client,
+        )
+    )
+
+    blocks = client.updated[0]["view"]["blocks"]
+    channel = next(block for block in blocks if block["block_id"] == "broadcast_channel")
+    assert channel["element"]["initial_conversation"] == "C1"
+
+
+def test_scope_choice_removes_channel_picker_when_scope_is_none() -> None:
+    app, client = _register()
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["scope_choice"](
+            ack=ack,
+            body={
+                "view": {
+                    "id": "V1",
+                    "private_metadata": json.dumps(
+                        {
+                            "requester_id": "U-requester",
+                            "target_id": "U-target",
+                            "target_name": "Grace",
+                        }
+                    ),
+                    "state": {
+                        "values": {
+                            "candidates": {"candidates": {"selected_users": []}},
+                            "broadcast_scope": {
+                                "scope_choice": {"selected_option": {"value": "none"}}
+                            },
+                            "broadcast_channel": {
+                                "channel_choice": {"selected_conversation": "C1"}
+                            },
+                            "message": {"message_input": {"value": "Edited message"}},
+                        }
+                    },
+                }
+            },
+            client=client,
+        )
+    )
+
+    blocks = client.updated[0]["view"]["blocks"]
+    assert [block["block_id"] for block in blocks] == ["candidates", "broadcast_scope", "message"]
+
+
+def test_submission_launches_broadcast_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    from reach_bot import broadcast
+
+    monkeypatch.setattr(broadcast, "SEND_DELAY_SECONDS", 0.0)
+
+    class Repo:
+        def __init__(self) -> None:
+            self.pings: list[str] = []
+
+        def create_reach_request(self, requester_id: str, target_id: str) -> Any:
+            return SimpleNamespace(id="request-1", requester_id=requester_id, target_id=target_id)
+
+        def create_ping(
+            self,
+            reach_request_id: str,
+            requester_id: str,
+            target_id: str,
+            candidate_id: str,
+            channel_context: Any,
+            presence: str,
+        ) -> Any:
+            self.pings.append(candidate_id)
+            return SimpleNamespace(id=f"ping-{len(self.pings)}")
+
+        def set_ping_delivery(self, ping_id: str, channel: str, message_ts: str) -> None:
+            pass
+
+        def known_count(self, reach_request_id: str) -> int:
+            return 0
+
+    repo = Repo()
+    app, client = _register(repository=repo)
+    client.channel_members["C1"] = ["U-target", "U-requester", "U-broadcast"]
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    async def scenario() -> None:
+        await app.handlers["reach_submit"](
+            ack=ack,
+            body={"user": {"id": "U-requester"}},
+            view={
+                "private_metadata": json.dumps(
+                    {"requester_id": "U-requester", "target_id": "U-target"}
+                ),
+                "state": {
+                    "values": {
+                        "candidates": {"candidates": {"selected_users": []}},
+                        "broadcast_scope": {
+                            "scope_choice": {"selected_option": {"value": "channel"}}
+                        },
+                        "broadcast_channel": {
+                            "channel_choice": {"selected_conversation": "C1"}
+                        },
+                        "message": {"message_input": {"value": "Anyone seen them?"}},
+                    }
+                },
+            },
+            client=client,
+        )
+        pending = [
+            task for task in reach_bot.handlers._background_tasks if not task.done()
+        ]
+        await asyncio.gather(*pending)
+
+    asyncio.run(scenario())
+
+    assert repo.pings == ["U-broadcast"]
+    assert client.sent[0]["channel"] == "U-broadcast"
+    assert "Reach, relaying for <@U-requester> about <@U-target>" in client.sent[0]["text"]
+    actions = client.sent[0]["blocks"][1]["elements"]
+    assert [element["action_id"] for element in actions] == [
+        "outcome_helped",
+        "outcome_unknown",
+        "outcome_more",
+    ]
 
 
 def test_i_know_click_opens_single_line_location_modal() -> None:
