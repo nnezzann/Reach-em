@@ -29,6 +29,9 @@ services:
       # repo or to this file. SLACK_SIGNING_SECRET is intentionally NOT
       # declared — it only applies to HTTP-mode request verification,
       # which this deployment does not use. PORT is set by Render itself.
-      - key: SLACK_BOT_TOKEN
-      - key: SLACK_APP_TOKEN
-      - key: DATABASE_URL
+      - key:  SLACK_BOT_TOKEN
+        sync: false
+      - key:  SLACK_APP_TOKEN
+        sync: false
+      - key:  DATABASE_URL
+        sync: false
