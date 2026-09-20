@@ -10,7 +10,7 @@ import pytest
 import reach_bot.handlers
 from reach_bot.handlers import register_handlers
 from reach_bot.persistence import PingOutcome
-from reach_bot.rendering import CUTOFF_STATUS
+from reach_bot.rendering import CUTOFF_STATUS, THANK_YOU_STATUS
 
 
 class FakeSlackApp:
@@ -589,6 +589,54 @@ class LocationRepo:
         return self.open_pings
 
 
+class UnknownRepo:
+    def __init__(self, existing_outcome: PingOutcome | None = None) -> None:
+        self.ping = SimpleNamespace(
+            id="ping-1",
+            reach_request_id="req-1",
+            requester_id="U-requester",
+            target_id="U-target",
+            candidate_id="U-candidate",
+            channel="C-candidate",
+            message_ts="1.0001",
+        )
+        self.existing_outcome = existing_outcome
+        self.recorded: list[str] = []
+
+    def get_ping(self, ping_id: str) -> Any:
+        return self.ping if ping_id == "ping-1" else None
+
+    def get_outcome(self, ping_id: str) -> PingOutcome | None:
+        return self.existing_outcome
+
+    def record_outcome(self, outcome: PingOutcome) -> None:
+        self.recorded.append(outcome.outcome)
+
+
+class ReplyRepo:
+    def __init__(self, existing_outcome: PingOutcome | None = None) -> None:
+        self.ping = SimpleNamespace(
+            id="ping-1",
+            reach_request_id="req-1",
+            requester_id="U-requester",
+            target_id="U-target",
+            candidate_id="U-candidate",
+            channel="C-candidate",
+            message_ts="1.0001",
+        )
+        self.existing_outcome = existing_outcome
+        self.recorded: list[str] = []
+
+    def get_ping(self, ping_id: str) -> Any:
+        return self.ping if ping_id == "ping-1" else None
+
+    def get_outcome(self, ping_id: str) -> PingOutcome | None:
+        return self.existing_outcome
+
+    def record_outcome(self, outcome: PingOutcome) -> None:
+        self.recorded.append(outcome.outcome)
+
+
 def _submit_location(app: Any, client: Any) -> None:
     async def ack(**kwargs: Any) -> None:
         pass
@@ -622,7 +670,9 @@ def test_location_submit_records_outcome_and_dms_requester() -> None:
     assert "<@U-candidate>" in text
     assert "<@U-target>" in text
     assert "In the library" in text
-    assert client.message_updates == []
+    # Cleanup is now applied to the responder's own message
+    assert len(client.message_updates) == 1
+    assert client.message_updates[0]["text"] == THANK_YOU_STATUS
 
 
 def test_third_i_know_sweeps_other_open_messages() -> None:
@@ -637,11 +687,14 @@ def test_third_i_know_sweeps_other_open_messages() -> None:
 
     _submit_location(app, client)
 
+    # First update is cleanup of responder's own message, then cutoff sweep
     assert [(update["channel"], update["ts"]) for update in client.message_updates] == [
-        ("C-other", "2.0001"),
-        ("C-other2", "3.0001"),
+        ("C-candidate", "1.0001"),  # responder's own cleanup
+        ("C-other", "2.0001"),     # cutoff sweep
+        ("C-other2", "3.0001"),   # cutoff sweep
     ]
-    assert all(update["text"] == CUTOFF_STATUS for update in client.message_updates)
+    assert client.message_updates[0]["text"] == THANK_YOU_STATUS
+    assert all(update["text"] == CUTOFF_STATUS for update in client.message_updates[1:])
 
 
 def test_fourth_i_know_shows_status_without_recording() -> None:
@@ -658,7 +711,8 @@ def test_fourth_i_know_shows_status_without_recording() -> None:
     ]
 
 
-def test_already_answered_ping_is_not_counted_or_recorded_twice() -> None:
+def test_already_answered_ping_shows_cutoff_status() -> None:
+    """I know with existing outcome shows cutoff status (special case for race condition)."""
     repo = LocationRepo(existing_outcome=PingOutcome("ping-1", "helped"))
     app, client = _register(repository=repo)
 
@@ -668,3 +722,104 @@ def test_already_answered_ping_is_not_counted_or_recorded_twice() -> None:
     assert repo.recorded == []
     assert client.sent == []
     assert len(client.message_updates) == 1
+    assert client.message_updates[0]["text"] == CUTOFF_STATUS
+
+
+def test_outcome_unknown_applies_cleanup() -> None:
+    repo = UnknownRepo()
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-1"})}],
+                "user": {"id": "U-candidate"},
+            },
+            client=client,
+        )
+    )
+
+    assert repo.recorded == ["unknown"]
+    assert len(client.message_updates) == 1
+    assert client.message_updates[0]["text"] == THANK_YOU_STATUS
+
+
+def test_outcome_unknown_duplicate_click_shows_ephemeral() -> None:
+    repo = UnknownRepo()
+    repo.existing_outcome = "unknown"
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-1"})}],
+                "user": {"id": "U-candidate"},
+            },
+            client=client,
+        )
+    )
+
+    assert repo.recorded == []  # No duplicate recording
+    assert len(client.sent) == 1
+    assert client.sent[0]["text"] == "You've already responded to this — thanks!"
+    assert client.message_updates == []  # No cleanup on duplicate
+
+
+def test_reply_more_submit_applies_cleanup() -> None:
+    repo = ReplyRepo()
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["reply_more_submit"](
+            ack=ack,
+            body={"user": {"id": "U-candidate"}},
+            view={
+                "private_metadata": "ping-1",
+                "state": {"values": {"reply": {"reply_input": {"value": "They're at lunch"}}}},
+            },
+            client=client,
+        )
+    )
+
+    assert repo.recorded == ["replied"]
+    assert len(client.sent) == 1
+    assert client.sent[0]["text"] == "Reply from Reach recipient:\nThey're at lunch"
+    assert len(client.message_updates) == 1
+    assert client.message_updates[0]["text"] == THANK_YOU_STATUS
+
+
+def test_reply_more_duplicate_click_shows_ephemeral() -> None:
+    repo = ReplyRepo()
+    repo.existing_outcome = "replied"
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["reply_more_submit"](
+            ack=ack,
+            body={"user": {"id": "U-candidate"}},
+            view={
+                "private_metadata": "ping-1",
+                "state": {"values": {"reply": {"reply_input": {"value": "They're at lunch"}}}},
+            },
+            client=client,
+        )
+    )
+
+    assert repo.recorded == []  # No duplicate recording
+    assert len(client.sent) == 1
+    assert client.sent[0]["text"] == "You've already responded to this — thanks!"
+    assert client.message_updates == []  # No cleanup on duplicate
