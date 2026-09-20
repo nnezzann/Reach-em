@@ -69,6 +69,10 @@ class ReachRepository(Protocol):
         """Delivered pings for a request that have not produced an outcome yet."""
         ...
 
+    def known_count(self, reach_request_id: str) -> int:
+        """Current "I know" count for a request (read only)."""
+        ...
+
     def affinities(self, target_id: str) -> dict[str, Affinity]: ...
 
 
@@ -134,6 +138,9 @@ class MemoryRepository:
             count = self._known_counts.get(reach_request_id, 0) + 1
             self._known_counts[reach_request_id] = count
         return count
+
+    def known_count(self, reach_request_id: str) -> int:
+        return self._known_counts.get(reach_request_id, 0)
 
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
         return [
@@ -300,6 +307,15 @@ class PostgresRepository:
             )
             row = cursor.fetchone()
         self.connection.commit()
+        return int(row[0]) if row is not None else 0
+
+    def known_count(self, reach_request_id: str) -> int:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT known_count FROM reach_requests WHERE id = %s",
+                (reach_request_id,),
+            )
+            row = cursor.fetchone()
         return int(row[0]) if row is not None else 0
 
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
