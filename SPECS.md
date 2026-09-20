@@ -681,9 +681,9 @@ closed by ANY response type:
 
 ---
 
-## 8. Delivery Modes
+## 9. Delivery Modes
 
-### 8.1 v1: bot-relay
+### 9.1 v1: bot-relay
 
 v1 supports only bot-relay delivery.
 
@@ -707,7 +707,7 @@ The exact copy belongs to the product/UX layer.
 
 ---
 
-### 8.2 v2: send-as-yourself
+### 9.2 v2: send-as-yourself
 
 Sending as the requester is a v2 feature.
 
@@ -732,7 +732,7 @@ message still works
 
 ---
 
-### 8.3 Settings
+### 9.3 Settings
 
 The v2 Settings tab must expose:
 
@@ -748,9 +748,9 @@ Previously sent messages are unaffected.
 
 ---
 
-## 9. Slack App Surface
+## 10. Slack App Surface
 
-### 9.1 `/reach`
+### 10.1 `/reach`
 
 The slash command takes no required arguments.
 
@@ -766,7 +766,7 @@ The command:
 
 ---
 
-### 9.2 Target selection
+### 10.2 Target selection
 
 The target user picker uses Slack's user-selection component.
 
@@ -792,7 +792,7 @@ The same modal is updated in place.
 
 ---
 
-### 9.3 Stage 2 rendering
+### 10.3 Stage 2 rendering
 
 The application renders, in order:
 
@@ -811,7 +811,7 @@ update happens inside the submit acknowledgement.
 
 ---
 
-### 9.4 Send submission
+### 10.4 Send submission
 
 On submission:
 
@@ -833,7 +833,7 @@ No public-channel message is sent.
 
 ---
 
-### 9.5 Recipient actions
+### 10.5 Recipient actions
 
 The outgoing message exposes:
 
@@ -863,7 +863,7 @@ without requiring the user to manually provide this context.
 
 ---
 
-## 10. Presence Cache
+## 11. Presence Cache
 
 Presence may be cached temporarily.
 
@@ -894,7 +894,7 @@ On cache miss, the system may query Slack and repopulate the cache.
 
 ---
 
-## 11. Configuration
+## 12. Configuration
 
 Values expected to change through real usage should be configuration rather than hardcoded.
 
