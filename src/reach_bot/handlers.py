@@ -11,6 +11,7 @@ from typing import Any
 
 from slack_sdk.errors import SlackApiError
 
+from reach_bot.broadcast import fan_out_broadcast
 from reach_bot.persistence import Ping, PingOutcome, ReachRepository
 from reach_bot.rendering import (
     CUTOFF_STATUS,
@@ -21,10 +22,12 @@ from reach_bot.rendering import (
     render_reach_stage2,
     render_recipient_actions,
     render_reply_modal,
-    render_why,
 )
 
 log = logging.getLogger(__name__)
+
+# Background fan-out tasks; kept referenced so they are not garbage-collected.
+_background_tasks: set[asyncio.Task[Any]] = set()
 
 
 def decode_action_value(value: str) -> dict[str, str]:
@@ -47,8 +50,6 @@ def register_handlers(
     slack_app: Any,
     *,
     repository: ReachRepository,
-    ranker: Callable[..., Any],
-    renderer: Callable[..., list[dict[str, Any]]],
     known_response_limit: int = 3,
 ) -> None:
     @slack_app.command("/reach")  # type: ignore[untyped-decorator]
@@ -86,60 +87,29 @@ def register_handlers(
                 errors={"target": "Please select who you are trying to reach."},
             )
             return
-        # Ack immediately — Slack enforces a 3-second window and the ranking
-        # call makes multiple Slack API requests that will exceed that limit.
-        # A bare ack() here would tell Slack to close the modal, which
-        # invalidates view_id before the views_update call below runs — so
-        # we ack with response_action="update" and a loading view instead,
-        # keeping the modal (and its view_id) alive.
+        requester_id = str(body["user"]["id"])
+        # One fast users_info call resolves the display name for the message
+        # prefill; everything else in Stage 2 is static, so the modal swaps
+        # directly inside this ack -- no loading view and no ranking step
+        # (suggestions are dormant).
+        target_name = target_id
+        try:
+            info = await client.users_info(user=target_id)
+            profile = info.get("user", {}).get("profile", {})
+            target_name = str(
+                profile.get("display_name")
+                or info.get("user", {}).get("real_name")
+                or info.get("user", {}).get("name")
+                or target_id
+            )
+        except SlackApiError as exc:
+            log.warning("users_info failed for target=%s: %s", target_id, exc)
         await ack(
             response_action="update",
-            view={
-                "type": "modal",
-                "callback_id": "reach_stage1_submit",
-                "title": {"type": "plain_text", "text": "Reach someone"},
-                "close": {"type": "plain_text", "text": "Close"},
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": ":hourglass_flowing_sand: Finding the best people to reach...",
-                        },
-                    }
-                ],
-            },
+            view=render_reach_stage2(
+                target_id, requester_id=requester_id, target_name=target_name
+            ),
         )
-        requester_id = str(body["user"]["id"])
-        view_id = view["id"]
-        try:
-            ranked = await asyncio.to_thread(ranker, target_id, requester_id)
-            candidate_ids = {c.user_id for c in (*ranked.active, *ranked.offline)}
-            names = await _resolve_names(client, candidate_ids | {target_id})
-            stage2_view = render_reach_stage2(
-                target_id, ranked, requester_id=requester_id, names=names
-            )
-            await client.views_update(view_id=view_id, view=stage2_view)
-        except Exception as exc:
-            log.exception("reach_stage1_submit error: %s", exc)
-            await client.views_update(
-                view_id=view_id,
-                view={
-                    "type": "modal",
-                    "callback_id": "reach_stage1_submit",
-                    "title": {"type": "plain_text", "text": "Reach someone"},
-                    "close": {"type": "plain_text", "text": "Close"},
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f":warning: Something went wrong: {exc}",
-                            },
-                        }
-                    ],
-                },
-            )
 
     @slack_app.view("reach_submit")  # type: ignore[untyped-decorator]
     async def reach_submit(
@@ -157,17 +127,36 @@ def register_handlers(
             )
             return
         requester_id = str(body["user"]["id"])
-        suggested: list[str] = []
-        for block in values.values():
-            element = next(iter(block.values()))
-            suggested.extend(str(option["value"]) for option in element.get("selected_options", []))
-        manual = values.get("manual_candidates", {}).get("manual_candidates", {})
-        recipients = list(dict.fromkeys((*suggested, *manual.get("selected_users", []))))
-        recipients = [user_id for user_id in recipients if user_id not in {target_id, requester_id}]
-        if not recipients:
+        candidates = [
+            str(user)
+            for user in dict.fromkeys(
+                values.get("candidates", {}).get("candidates", {}).get("selected_users", [])
+            )
+        ]
+        scope = str(
+            (
+                values.get("broadcast_scope", {}).get("scope_choice", {}).get("selected_option")
+                or {}
+            ).get("value", "none")
+        )
+        channel_id = str(
+            values.get("broadcast_channel", {})
+            .get("channel_choice", {})
+            .get("selected_conversation", "")
+            or ""
+        )
+        if scope == "channel" and not channel_id:
             await ack(
                 response_action="errors",
-                errors={"manual_candidates": "Select at least one recipient."},
+                errors={"broadcast_channel": "Pick a channel."},
+            )
+            return
+        if not candidates and scope == "none":
+            await ack(
+                response_action="errors",
+                errors={
+                    "candidates": "Pick at least one person, or choose a broadcast option below."
+                },
             )
             return
         message = str(values["message"]["message_input"].get("value", "")).strip()
@@ -180,18 +169,18 @@ def register_handlers(
         # Ack immediately before the slow DB writes and chat_postMessage calls.
         await ack()
         request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
-        ranked = await asyncio.to_thread(ranker, target_id, requester_id)
-        by_id = {candidate.user_id: candidate for candidate in (*ranked.active, *ranked.offline)}
-        for candidate_id in recipients:
-            candidate = by_id.get(candidate_id)
+        hand_picked = [user for user in candidates if user not in {target_id, requester_id}]
+        for candidate_id in hand_picked:
+            # Suggestions are dormant: no computed channel context or
+            # presence exists for hand-picked recipients.
             ping = await asyncio.to_thread(
                 repository.create_ping,
                 request.id,
                 requester_id,
                 target_id,
                 candidate_id,
-                candidate.evidence[0] if candidate and candidate.evidence else None,
-                candidate.presence if candidate else "offline",
+                None,
+                "unknown",
             )
             # Mentions are built server-side from stored IDs; the requester's
             # composed message rides along as free text (modal input is
@@ -219,6 +208,62 @@ def register_handlers(
                 str(response.get("channel", "")),
                 str(response.get("ts", "")),
             )
+        if scope in {"channel", "workspace"}:
+            task = asyncio.create_task(
+                fan_out_broadcast(
+                    client,
+                    repository,
+                    reach_request_id=request.id,
+                    requester_id=requester_id,
+                    target_id=target_id,
+                    scope=scope,
+                    channel_id=channel_id,
+                    message=message,
+                    exclude=set(hand_picked) | {target_id, requester_id},
+                    known_response_limit=known_response_limit,
+                )
+            )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+
+    @slack_app.action("scope_choice")  # type: ignore[untyped-decorator]
+    async def scope_choice_changed(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
+    ) -> None:
+        """Show or hide the channel picker as the broadcast scope changes."""
+        await ack()
+        view = body["view"]
+        state = view["state"]["values"]
+        metadata = json.loads(view.get("private_metadata", "{}"))
+        scope = str(
+            (
+                state.get("broadcast_scope", {}).get("scope_choice", {}).get("selected_option")
+                or {}
+            ).get("value", "none")
+        )
+        selected_users = [
+            str(user)
+            for user in state.get("candidates", {}).get("candidates", {}).get("selected_users", [])
+        ]
+        selected_channel = str(
+            state.get("broadcast_channel", {})
+            .get("channel_choice", {})
+            .get("selected_conversation", "")
+            or ""
+        )
+        message_value = state.get("message", {}).get("message_input", {}).get("value")
+        await client.views_update(
+            view_id=view["id"],
+            view=render_reach_stage2(
+                str(metadata.get("target_id", "")),
+                requester_id=str(metadata.get("requester_id", "")),
+                target_name=str(metadata.get("target_name", "")) or None,
+                scope=scope,
+                initial_candidates=selected_users,
+                initial_channel=selected_channel if scope == "channel" else None,
+                message_value=message_value,
+            ),
+        )
 
     @slack_app.action(re.compile(r"^ping_candidate(?:_|$)"))  # type: ignore[untyped-decorator]
     async def ping_candidate(
@@ -232,27 +277,6 @@ def register_handlers(
                 value["candidate_id"], value["target_id"], ping_id=value.get("ping_id", "")
             ),
         )
-
-    @slack_app.action("why_these_people")  # type: ignore[untyped-decorator]
-    async def why_these_people(
-        ack: Callable[..., Awaitable[None]],
-        body: dict[str, Any],
-        respond: Callable[..., Awaitable[None]],
-    ) -> None:
-        await ack()
-        target_id = str(body["actions"][0]["value"])
-        try:
-            ranked = await asyncio.to_thread(ranker, target_id, str(body["user"]["id"]))
-            await respond(
-                response_type="ephemeral", replace_original=False, blocks=render_why(ranked)
-            )
-        except Exception as exc:
-            log.exception("why_these_people error for target=%s", target_id)
-            await respond(
-                response_type="ephemeral",
-                replace_original=False,
-                text=f"Something went wrong: {exc}",
-            )
 
     @slack_app.view("ping_submit")  # type: ignore[untyped-decorator]
     async def ping_submit(
@@ -402,28 +426,3 @@ async def _record_outcome(body: dict[str, Any], repository: ReachRepository, out
     value = decode_action_value(action.get("value", "{}"))
     if "ping_id" in value:
         repository.record_outcome(PingOutcome(value["ping_id"], outcome))
-
-
-async def _resolve_names(client: Any, user_ids: set[str]) -> dict[str, str]:
-    """Look up display names for a small set of user IDs, concurrently.
-
-    Falls back to the raw ID (so button text still renders something
-    sensible) if a lookup fails for any reason.
-    """
-
-    async def _one(user_id: str) -> tuple[str, str]:
-        try:
-            info = await client.users_info(user=user_id)
-            profile = info.get("user", {}).get("profile", {})
-            name = (
-                profile.get("display_name")
-                or info.get("user", {}).get("real_name")
-                or info.get("user", {}).get("name")
-                or user_id
-            )
-            return user_id, str(name)
-        except SlackApiError:
-            return user_id, user_id
-
-    results = await asyncio.gather(*(_one(uid) for uid in user_ids))
-    return dict(results)
