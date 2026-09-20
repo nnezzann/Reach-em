@@ -46,18 +46,23 @@ sequence — this removes an extra round trip and feels materially faster.
 1. Requester types `/reach` (no arguments needed).
 2. **Stage 1**: a modal opens immediately with one field — "Who are you
    trying to reach?" (a user picker).
-3. The moment a target is selected, the same modal **updates in place**
-   (`views.update`, triggered by the field's `dispatch_action`) to show
-   **Stage 2**:
-   - Suggested candidates, pre-ranked and pre-checked (checkboxes, not
-     buttons — see §5.2), grouped by presence.
-   - An optional field: "Add anyone else who might be near them" (a
-     multi-user picker) — for candidates the requester knows about that
-     the algorithm didn't surface. This is a real signal, not just a
-     convenience field (see §7.3).
-   - A single editable message field, pre-filled with a default line.
-4. Requester hits **Send**. One composed message goes out to every
-   selected recipient (suggested + manually added, deduped).
+3. On Stage 1 submit, the same modal **updates in place**
+   (`response_action: "update"`) to show **Stage 2** immediately — no
+   loading step, because no candidate computation runs (the ranking
+   engine is dormant). Stage 2 (block layout in §5.2):
+   - An optional "Add people who might know" multi-user picker — the
+     primary, always-visible way to pick recipients.
+   - A broadcast scope radio: just the people above (default), everyone
+     in a channel, or everyone in the workspace. Choosing a channel
+     reveals a channel picker, inserted/removed by re-rendering the
+     modal on scope change.
+   - A single editable message field, pre-filled with a default line
+     built server-side from the resolved target's display name.
+4. Requester hits **Send**. Hand-picked recipients are DM'd
+   synchronously; if a non-"None" broadcast scope was chosen, a
+   background fan-out DMs the channel's or workspace's human members
+   (deduped against the hand-picked list, target and requester
+   excluded, stopped early once the response cutoff is hit).
 5. Each recipient receives the message with three reply actions:
    **I know** / **I don't know** / **Custom message** (see §6).
 6. Replies route back to the requester (directly or via the bot,
@@ -120,19 +125,33 @@ the requester act with minimal reading. If filling out the modal takes
 longer than just posting in the channel, the tool has failed its purpose.
 
 ### 5.2 Stage 2 layout
-- **Suggested section**: checkboxes, grouped/labeled by presence
-  (🟢 active / ⚪ offline), pre-checked on the top 1–2 ranked candidates so
-  the fast path is "open modal → hit Send" with zero extra taps for the
-  common case.
-- Checkboxes, not buttons: this is now a batch action (one message to
-  potentially several people), not a single ping-and-click as in the
-  original design — a multi-select input matches that.
-- **Manual add field**: `multi_users_select`, optional, clearly labeled as
-  "people you think might be near them" — distinct in purpose from the
-  suggested list, not merged into it.
-- **Message field**: single `plain_text_input`, pre-filled with a
-  reasonable default (editable), sent identically to every selected
-  recipient.
+Stage 2 renders immediately on Stage 1 submit (`response_action:
+"update"`) — no loading view, since no candidate computation runs.
+Blocks, in this order:
+- **People picker** (block_id `candidates`): `multi_users_select`
+  (action_id `candidates`), optional, placeholder "Add people who might
+  know" — the primary way to pick recipients.
+- **Broadcast scope** (block_id `broadcast_scope`): `radio_buttons`
+  (action_id `scope_choice`) with exactly three options — "None (just
+  the people above)" (default), "Everyone in a channel", "Everyone in
+  the workspace". The block is `optional: false`; radio buttons always
+  carry a value once rendered, and the default covers the "false start"
+  case.
+- **Channel picker** (block_id `broadcast_channel`):
+  `conversations_select` (action_id `channel_choice`), filtered to
+  public + private channels, present ONLY when the scope is "Everyone
+  in a channel". Block Kit has no native conditional visibility, so a
+  `scope_choice` block_actions listener re-renders the modal with
+  `views.update`, inserting or removing this block and preserving
+  everything already entered. The re-render is a single update with
+  static content — no loading state.
+- **Message field** (block_id `message`): single `plain_text_input`,
+  initial value built server-side from the resolved target's display
+  name (editable), sent identically to every recipient.
+
+Submission requires at least one hand-picked person or a non-"None"
+scope; a channel scope without a chosen channel is a validation error
+on `broadcast_channel`, never a silent fallback to "None."
 
 ### 5.3 "Why" detail (opt-in only, v2)
 No ranking justification is shown by default. If added later, gate it
