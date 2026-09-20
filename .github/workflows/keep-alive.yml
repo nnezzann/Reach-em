@@ -64,4 +64,4 @@ jobs:
           # -f fails the step on any HTTP error (>=400) or failed
           # connection, so a ping that does not return 200 shows up as a
           # failed run in the Actions tab.
-          curl -f "${{ secrets.RENDER_APP_URL }}/health"
+          curl -f "${{ vars.RENDER_APP_URL }}/health"
