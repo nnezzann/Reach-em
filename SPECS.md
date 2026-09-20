@@ -681,9 +681,9 @@ closed by ANY response type:
 
 ---
 
-## 9. Delivery Modes
+## 8. Delivery Modes
 
-### 9.1 v1: bot-relay
+### 8.1 v1: bot-relay
 
 v1 supports only bot-relay delivery.
 
@@ -707,7 +707,7 @@ The exact copy belongs to the product/UX layer.
 
 ---
 
-### 9.2 v2: send-as-yourself
+### 8.2 v2: send-as-yourself
 
 Sending as the requester is a v2 feature.
 
@@ -732,7 +732,7 @@ message still works
 
 ---
 
-### 9.3 Settings
+### 8.3 Settings
 
 The v2 Settings tab must expose:
 
@@ -748,9 +748,9 @@ Previously sent messages are unaffected.
 
 ---
 
-## 10. Slack App Surface
+## 9. Slack App Surface
 
-### 10.1 `/reach`
+### 9.1 `/reach`
 
 The slash command takes no required arguments.
 
@@ -766,7 +766,7 @@ The command:
 
 ---
 
-### 10.2 Target selection
+### 9.2 Target selection
 
 The target user picker uses Slack's user-selection component.
 
@@ -792,7 +792,7 @@ The same modal is updated in place.
 
 ---
 
-### 10.3 Stage 2 rendering
+### 9.3 Stage 2 rendering
 
 The application renders, in order:
 
@@ -811,7 +811,7 @@ update happens inside the submit acknowledgement.
 
 ---
 
-### 10.4 Send submission
+### 9.4 Send submission
 
 On submission:
 
@@ -833,7 +833,7 @@ No public-channel message is sent.
 
 ---
 
-### 10.5 Recipient actions
+### 9.5 Recipient actions
 
 The outgoing message exposes:
 
@@ -863,7 +863,7 @@ without requiring the user to manually provide this context.
 
 ---
 
-## 11. Presence Cache
+## 10. Presence Cache
 
 Presence may be cached temporarily.
 
@@ -894,7 +894,7 @@ On cache miss, the system may query Slack and repopulate the cache.
 
 ---
 
-## 12. Configuration
+## 11. Configuration
 
 Values expected to change through real usage should be configuration rather than hardcoded.
 
@@ -993,7 +993,7 @@ flowchart LR
 
 ---
 
-## 14. v1 Implementation Scope
+## 13. v1 Implementation Scope
 
 v1 must implement the smallest complete version of the actual product flow.
 
@@ -1026,7 +1026,7 @@ v1 must implement the smallest complete version of the actual product flow.
 
 ---
 
-## 15. v2 Implementation Scope
+## 14. v2 Implementation Scope
 
 After v1 has been validated through actual usage:
 
@@ -1042,7 +1042,7 @@ After v1 has been validated through actual usage:
 
 ---
 
-## 16. "Why These People" Architecture
+## 15. "Why These People" Architecture
 
 The default UI does not show ranking explanations.
 
@@ -1066,11 +1066,11 @@ The default suggestion interface remains minimal.
 
 ---
 
-## 17. Guardrails
+## 16. Guardrails
 
 These constraints are mandatory.
 
-### 17.1 No public-channel escalation
+### 16.1 No public-channel escalation
 
 The bot must never post a Reach request into a public channel on behalf of the requester.
 
@@ -1088,7 +1088,7 @@ Direct messages only
 
 ---
 
-### 17.2 No autonomous messaging
+### 16.2 No autonomous messaging
 
 The bot must not send a message merely because it identified a candidate.
 
@@ -1096,7 +1096,7 @@ A candidate must be explicitly selected by the requester.
 
 ---
 
-### 17.3 No private DM access
+### 16.3 No private DM access
 
 The ranking system must never depend on private DMs.
 
@@ -1104,7 +1104,7 @@ All relational signals must originate from permitted Slack-visible sources.
 
 ---
 
-### 17.4 No visible reputation system
+### 16.4 No visible reputation system
 
 Learned affinity must remain an internal ranking signal.
 
@@ -1118,7 +1118,7 @@ Never expose:
 
 ---
 
-### 17.5 Minimal interruption
+### 16.5 Minimal interruption
 
 The UI should remain optimized for:
 
