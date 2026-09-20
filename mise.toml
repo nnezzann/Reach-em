@@ -1,3 +1,4 @@
 [tools]
 node = "lts"
 "npm:freebuff" = "latest"
+pi = "latest"
