@@ -36,87 +36,110 @@ def render_reach_stage1() -> dict[str, Any]:
     }
 
 
+SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("none", "None (just the people above)"),
+    ("channel", "Everyone in a channel"),
+    ("workspace", "Everyone in the workspace"),
+)
+
+
 def render_reach_stage2(
     target_id: str,
-    ranked: RankedCandidates,
     *,
     requester_id: str,
-    names: dict[str, str] | None = None,
-    default_message: str | None = None,
+    target_name: str | None = None,
+    scope: str = "none",
+    initial_candidates: list[str] | None = None,
+    initial_channel: str | None = None,
+    message_value: str | None = None,
 ) -> dict[str, Any]:
-    names = names or {}
-    # plain_text options (checkbox labels) never resolve <@Uxxxx> mention
-    # syntax -- Slack shows the literal characters. Use the resolved
-    # display name, falling back to the raw ID only if the lookup failed.
-    candidates = (*ranked.active, *ranked.offline)
-    checked_ids = {candidate.user_id for candidate in candidates[:2]}
-    blocks: list[dict[str, Any]] = []
-    for label, group in (("Active now", ranked.active), ("Offline", ranked.offline)):
-        if not group:
-            continue
-        options = [
-            {
-                "text": {
-                    "type": "plain_text",
-                    "text": names.get(candidate.user_id, candidate.user_id),
-                },
-                "value": candidate.user_id,
-            }
-            for candidate in group
-        ]
-        initial_options = [option for option in options if option["value"] in checked_ids]
+    """Stage 2: the recipient-selection modal, built from static content.
+
+    ``scope``, ``initial_candidates``, ``initial_channel``, and
+    ``message_value`` exist so the ``scope_choice`` listener can re-render
+    the modal with the requester's current input preserved.
+    """
+    if scope not in {value for value, _ in SCOPE_OPTIONS}:
+        scope = "none"
+    if target_name is None:
+        target_name = target_id
+    candidates_block: dict[str, Any] = {
+        "type": "input",
+        "block_id": "candidates",
+        "label": {"type": "plain_text", "text": "Who should we ask?"},
+        "element": {
+            "type": "multi_users_select",
+            "action_id": "candidates",
+            "placeholder": {"type": "plain_text", "text": "Add people who might know"},
+        },
+        "optional": True,
+    }
+    if initial_candidates:
+        candidates_block["element"]["initial_users"] = initial_candidates
+
+    options = [
+        {"text": {"type": "plain_text", "text": label}, "value": value}
+        for value, label in SCOPE_OPTIONS
+    ]
+    blocks: list[dict[str, Any]] = [
+        candidates_block,
+        {
+            "type": "input",
+            "block_id": "broadcast_scope",
+            "label": {"type": "plain_text", "text": "Also ask"},
+            "element": {
+                "type": "radio_buttons",
+                "action_id": "scope_choice",
+                "options": options,
+                "initial_option": next(o for o in options if o["value"] == scope),
+            },
+        },
+    ]
+    if scope == "channel":
+        channel_element: dict[str, Any] = {
+            "type": "conversations_select",
+            "action_id": "channel_choice",
+            "placeholder": {"type": "plain_text", "text": "Pick a channel"},
+            "filter": {"include": ["public", "private"]},
+        }
+        if initial_channel:
+            channel_element["initial_conversation"] = initial_channel
         blocks.append(
             {
                 "type": "input",
-                "block_id": f"suggested_{label.lower().replace(' ', '_')}",
-                "label": {"type": "plain_text", "text": label},
-                "element": {
-                    "type": "checkboxes",
-                    "action_id": "suggested_candidates",
-                    "options": options,
-                    "initial_options": initial_options,
-                },
-                "optional": True,
+                "block_id": "broadcast_channel",
+                "label": {"type": "plain_text", "text": "Channel"},
+                "element": channel_element,
             }
         )
-    # Same reasoning as above -- plain_text_input's initial_value is literal
-    # text, so bake the resolved target name in rather than mention syntax.
-    target_name = names.get(target_id, target_id)
-    message_text = default_message or f"Have you seen {target_name}? " + DEFAULT_MESSAGE
-    blocks.extend(
-        [
-            {
-                "type": "input",
-                "block_id": "manual_candidates",
-                "label": {
-                    "type": "plain_text",
-                    "text": "Add anyone else who might be near them",
-                },
-                "element": {
-                    "type": "multi_users_select",
-                    "action_id": "manual_candidates",
-                    "placeholder": {"type": "plain_text", "text": "Optional"},
-                },
-                "optional": True,
+    # plain_text_input's initial_value is literal text -- Slack never
+    # resolves mention syntax inside it -- so bake the resolved target name
+    # in rather than mention syntax.
+    blocks.append(
+        {
+            "type": "input",
+            "block_id": "message",
+            "label": {"type": "plain_text", "text": "Message"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "message_input",
+                "initial_value": message_value
+                or (f"Have you seen {target_name}? " + DEFAULT_MESSAGE),
+                "placeholder": {"type": "plain_text", "text": "Type a short message"},
+                "multiline": False,
             },
-            {
-                "type": "input",
-                "block_id": "message",
-                "label": {"type": "plain_text", "text": "Message"},
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "message_input",
-                    "initial_value": message_text,
-                    "multiline": False,
-                },
-            },
-        ]
+        }
     )
     return {
         "type": "modal",
         "callback_id": "reach_submit",
         "private_metadata": json.dumps(
-            {"requester_id": requester_id, "target_id": target_id}, separators=(",", ":")
+            {
+                "requester_id": requester_id,
+                "target_id": target_id,
+                "target_name": target_name,
+            },
+            separators=(",", ":"),
         ),
         "title": {"type": "plain_text", "text": "Reach someone"},
         "submit": {"type": "plain_text", "text": "Send"},
