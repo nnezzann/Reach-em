@@ -1,5 +1,7 @@
 from reach_bot.ranking import Candidate, RankedCandidates
 from reach_bot.rendering import (
+    mrkdwn_section,
+    render_location_modal,
     render_reach_stage1,
     render_reach_stage2,
     render_recipient_actions,
@@ -81,6 +83,40 @@ def test_recipient_actions_include_all_ping_context_and_expected_interactions():
         "candidate_id": "candidate",
     }
     assert all(element["accessibility_label"] for element in block["elements"])
+
+
+def test_recipient_buttons_use_updated_labels():
+    block = render_recipient_actions(
+        ping_id="p", reach_request_id="r", requester_id="q", target_id="t", candidate_id="c"
+    )
+
+    assert [element["text"]["text"] for element in block["elements"]] == [
+        "\u2705 I know",
+        "\u274c I don't know",
+        "\U0001f4ac Custom message",
+    ]
+    assert len(block["elements"]) == 3
+
+
+def test_location_modal_is_a_single_line_input():
+    view = render_location_modal("ping-1")
+
+    assert view["callback_id"] == "location_submit"
+    assert view["private_metadata"] == "ping-1"
+    block = view["blocks"][0]
+    assert block["block_id"] == "location"
+    element = block["element"]
+    assert element["type"] == "plain_text_input"
+    assert element["action_id"] == "location_input"
+    assert element["multiline"] is False
+    assert element["placeholder"]["text"] == "Where or how can they reach them?"
+
+
+def test_mrkdwn_section_helper_builds_minimal_section():
+    assert mrkdwn_section("hello") == {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "hello"},
+    }
 
 
 def test_why_detail_does_not_expose_internal_signal_scores():

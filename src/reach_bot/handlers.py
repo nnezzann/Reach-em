@@ -6,12 +6,16 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from slack_sdk.errors import SlackApiError
 
-from reach_bot.persistence import PingOutcome, ReachRepository
+from reach_bot.persistence import Ping, PingOutcome, ReachRepository
 from reach_bot.rendering import (
+    CUTOFF_STATUS,
+    mrkdwn_section,
+    render_location_modal,
     render_ping_modal,
     render_reach_stage1,
     render_reach_stage2,
@@ -45,6 +49,7 @@ def register_handlers(
     repository: ReachRepository,
     ranker: Callable[..., Any],
     renderer: Callable[..., list[dict[str, Any]]],
+    known_response_limit: int = 3,
 ) -> None:
     @slack_app.command("/reach")  # type: ignore[untyped-decorator]
     async def reach_command(
@@ -188,18 +193,31 @@ def register_handlers(
                 candidate.evidence[0] if candidate and candidate.evidence else None,
                 candidate.presence if candidate else "offline",
             )
-            await client.chat_postMessage(
+            # Mentions are built server-side from stored IDs; the requester's
+            # composed message rides along as free text (modal input is
+            # literal text Slack never resolves into mentions).
+            text = f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
+            response = await client.chat_postMessage(
                 channel=candidate_id,
-                text=f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}",
+                text=text,
                 blocks=[
+                    mrkdwn_section(text),
                     render_recipient_actions(
                         ping_id=ping.id,
                         reach_request_id=request.id,
                         requester_id=requester_id,
                         target_id=target_id,
                         candidate_id=candidate_id,
-                    )
+                    ),
                 ],
+            )
+            # Remember where the message landed so it can be rewritten when
+            # the response cutoff is reached.
+            await asyncio.to_thread(
+                repository.set_ping_delivery,
+                ping.id,
+                str(response.get("channel", "")),
+                str(response.get("ts", "")),
             )
 
     @slack_app.action(re.compile(r"^ping_candidate(?:_|$)"))  # type: ignore[untyped-decorator]
@@ -244,31 +262,44 @@ def register_handlers(
         candidate_id, target_id, ping_id = view["private_metadata"].split(":", 2)
         message = view["state"]["values"]["message"]["message_input"]["value"]
         ping = repository.get_ping(ping_id)
-        await client.chat_postMessage(
+        text = f"<@{body['user']['id']}> is trying to reach you about <@{target_id}>:\n{message}"
+        response = await client.chat_postMessage(
             channel=candidate_id,
-            text=f"<@{body['user']['id']}> is trying to reach you about <@{target_id}>:\n{message}",
+            text=text,
             blocks=[
+                mrkdwn_section(text),
                 render_recipient_actions(
                     ping_id=ping_id,
                     reach_request_id=ping.reach_request_id if ping else "",
                     requester_id=ping.requester_id if ping else str(body["user"]["id"]),
                     target_id=ping.target_id if ping else target_id,
                     candidate_id=ping.candidate_id if ping else candidate_id,
-                )
+                ),
             ],
         )
+        if ping is not None and ping_id:
+            repository.set_ping_delivery(
+                ping_id, str(response.get("channel", "")), str(response.get("ts", ""))
+            )
 
-    for action, outcome in (
-        ("outcome_helped", "helped"),
-        ("outcome_unknown", "unknown"),
-    ):
+    @slack_app.action("outcome_helped")  # type: ignore[untyped-decorator]
+    async def outcome_helped(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], client: Any
+    ) -> None:
+        """Opens the one-field location modal before recording anything."""
+        await ack()
+        value = decode_action_value(body["actions"][0].get("value", "{}"))
+        await client.views_open(
+            trigger_id=body["trigger_id"],
+            view=render_location_modal(value.get("ping_id", "")),
+        )
 
-        @slack_app.action(action)  # type: ignore[untyped-decorator]
-        async def outcome_handler(
-            ack: Callable[..., Awaitable[None]], body: dict[str, Any], _outcome: str = outcome
-        ) -> None:
-            await ack()
-            await _record_outcome(body, repository, _outcome)
+    @slack_app.action("outcome_unknown")  # type: ignore[untyped-decorator]
+    async def outcome_unknown(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any]
+    ) -> None:
+        await ack()
+        await _record_outcome(body, repository, "unknown")
 
     @slack_app.action("outcome_more")  # type: ignore[untyped-decorator]
     async def outcome_more(
@@ -297,6 +328,73 @@ def register_handlers(
             channel=ping.requester_id,
             text=f"Reply from Reach recipient:\n{reply}",
         )
+
+    @slack_app.view("location_submit")  # type: ignore[untyped-decorator]
+    async def location_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+    ) -> None:
+        """Handle the "I know" modal: record, relay, and enforce the cutoff."""
+        await ack()
+        ping_id = str(view.get("private_metadata", ""))
+        location = str(
+            view["state"]["values"]["location"]["location_input"].get("value", "")
+        ).strip()
+        ping = repository.get_ping(ping_id) if ping_id else None
+        if ping is None:
+            log.warning("location_submit received unknown ping_id=%s", ping_id)
+            return
+        # Re-check on submit: the button may have been clicked before a
+        # cutoff that has since been reached, and a ping that already
+        # answered must not be counted or recorded twice.
+        if repository.get_outcome(ping_id) is not None:
+            await _replace_with_cutoff_status(client, ping)
+            return
+        count = repository.increment_known_count(ping.reach_request_id)
+        if count > known_response_limit:
+            await _replace_with_cutoff_status(client, ping)
+            return
+        repository.record_outcome(
+            PingOutcome(
+                ping_id,
+                "helped",
+                responded_at=datetime.now(UTC),
+                location=location or None,
+            )
+        )
+        if location:
+            await client.chat_postMessage(
+                channel=ping.requester_id,
+                text=(
+                    f"<@{ping.candidate_id}> knows how to reach "
+                    f"<@{ping.target_id}>: {location}"
+                ),
+            )
+        if count == known_response_limit:
+            await _sweep_open_messages(repository, client, ping)
+
+
+async def _replace_with_cutoff_status(client: Any, ping: Ping) -> None:
+    """Swap a stale recipient message's buttons for the cutoff status line."""
+    if not ping.message_ts:
+        return
+    try:
+        await client.chat_update(channel=ping.channel, ts=ping.message_ts, text=CUTOFF_STATUS)
+    except SlackApiError as exc:
+        log.error("chat_update cutoff status failed for ping=%s: %s", ping.id, exc)
+
+
+async def _sweep_open_messages(
+    repository: ReachRepository, client: Any, responded_ping: Ping
+) -> None:
+    """Replace the buttons on every other open message for this reach request."""
+    others = repository.get_unresponded_pings(responded_ping.reach_request_id)
+    for other in others:
+        if other.id == responded_ping.id or not other.message_ts:
+            continue
+        try:
+            await client.chat_update(channel=other.channel, ts=other.message_ts, text=CUTOFF_STATUS)
+        except SlackApiError as exc:
+            log.error("chat_update cutoff sweep failed for ping=%s: %s", other.id, exc)
 
 
 async def _record_outcome(body: dict[str, Any], repository: ReachRepository, outcome: str) -> None:

@@ -6,6 +6,12 @@ from typing import Any
 from reach_bot.ranking import Candidate, RankedCandidates
 
 DEFAULT_MESSAGE = "Do you know where they are or how to reach them?"
+CUTOFF_STATUS = "Someone already confirmed a location for this — thanks!"
+
+
+def mrkdwn_section(text: str) -> dict[str, Any]:
+    """Minimal section block; the building block for recipient-facing text."""
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
 def render_reach_stage1() -> dict[str, Any]:
@@ -203,8 +209,8 @@ def render_recipient_actions(
             }
             for action_id, label in (
                 ("outcome_helped", "\u2705 I know"),
-                ("outcome_unknown", "\u274c Don't know"),
-                ("outcome_more", "\U0001f4ac Reply with more"),
+                ("outcome_unknown", "\u274c I don't know"),
+                ("outcome_more", "\U0001f4ac Custom message"),
             )
         ],
     }
@@ -230,6 +236,37 @@ def render_ping_modal(
                     "type": "plain_text_input",
                     "action_id": "message_input",
                     "initial_value": text,
+                    "multiline": False,
+                },
+            }
+        ],
+    }
+
+
+def render_location_modal(ping_id: str) -> dict[str, Any]:
+    """Follow-up modal for "I know": one single-line location field."""
+    return {
+        "type": "modal",
+        "callback_id": "location_submit",
+        "private_metadata": ping_id,
+        "title": {"type": "plain_text", "text": "I know"},
+        "submit": {"type": "plain_text", "text": "Send"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "location",
+                "label": {
+                    "type": "plain_text",
+                    "text": "Do you know where they are?",
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "location_input",
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Where or how can they reach them?",
+                    },
                     "multiline": False,
                 },
             }

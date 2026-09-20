@@ -59,7 +59,7 @@ sequence — this removes an extra round trip and feels materially faster.
 4. Requester hits **Send**. One composed message goes out to every
    selected recipient (suggested + manually added, deduped).
 5. Each recipient receives the message with three reply actions:
-   **I know** / **Don't know** / **Reply with more** (see §6).
+   **I know** / **I don't know** / **Custom message** (see §6).
 6. Replies route back to the requester (directly or via the bot,
    depending on the requester's delivery preference — see §8).
 
@@ -152,20 +152,63 @@ inline text — the default view stays minimal regardless.
 Every outgoing message includes three actions, regardless of delivery
 mode (bot-relay or send-as-user — see §8):
 
-- **✅ I know** — records a positive outcome; optionally opens a small
-  one-field modal to capture where/how to reach the target, relayed back
-  to the requester.
-- **❌ Don't know** — records an explicit negative outcome (distinct from
-  a timeout/no-response — see Technical Spec §3.1 for why this
-  distinction matters to the learning model).
-- **💬 Reply with more** — opens a one-field modal for a free-text reply,
-  relayed back to the requester as a DM.
+- **✅ I know** — opens a small one-field modal (a single-line text
+  input) asking where or how the target can be reached. On submit the bot
+  records the positive outcome, relays that detail back to the requester
+  as a DM, and runs the response-limit check (§6.2).
+- **❌ I don't know** — a plain button, no modal. Records an explicit
+  negative outcome (distinct from a timeout/no-response — see Technical
+  Spec §6.3 for why this distinction matters to the learning model). It
+  does not interact with the response limit.
+- **💬 Custom message** — opens a one-field modal for a free-text reply,
+  relayed back to the requester as a DM. Does not count toward the
+  response limit.
 
 These actions are the system's primary source of outcome data, which
 feeds the learned affinity ranking over time (§4.4). Framing them clearly
 and making them low-effort (one tap, or one tap + one short field) is
 directly what makes the learning loop viable — if replying is annoying,
 people won't use the buttons and the model never improves.
+
+### 6.1 Recipient message format
+
+- Mentions are built server-side from stored IDs (`<@target_id>`,
+  `<@requester_id>`) — never taken from what the requester typed in the
+  modal, since `plain_text_input` values are always literal text that
+  Slack never resolves into mentions.
+- The requester's composed message is included as free text alongside the
+  mentions, not instead of them.
+- Layout stays minimal: `section` blocks with mrkdwn text plus exactly
+  one `actions` block for the three reply buttons. No decorative images
+  or avatar-heavy layouts, and no emoji in body text beyond the
+  functional markers on the button labels. Visual weight is reserved for
+  functionally meaningful changes (e.g. the status line that replaces the
+  buttons once the response limit is reached).
+
+### 6.2 Three-response cutoff
+
+Once 3 people have responded "I know" for a given reach request, the
+remaining open recipient messages for that request stop offering the
+three buttons.
+
+- The count is tracked per reach request (`reach_request_id`), never
+  globally and never per message.
+- Increment-and-check is atomic at the data layer — one statement that
+  increments and returns the new count — so two near-simultaneous
+  "I know" responses cannot both slip under the limit.
+- Slack buttons have no native disabled state. "Disabling" means
+  rewriting each still-open message for that request with `chat.update`
+  into a single plain-text status line (e.g. "Someone already confirmed a
+  location for this — thanks!"), which requires the channel and message
+  timestamp of every sent recipient message (hand-picked or broadcast) to
+  be stored on its ping record.
+- The "I know" modal submit handler re-checks the count on submission, so
+  anyone clicking after the limit was already hit sees the friendly
+  "someone already found them" status instead of having their response
+  recorded twice.
+- The cutoff applies uniformly no matter how the recipient message was
+  sent (hand-picked or via channel/workspace broadcast); broadcast
+  recipients are never special-cased.
 
 ## 7. Delivery Modes
 

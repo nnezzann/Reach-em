@@ -393,9 +393,13 @@ id
 requesterId
 targetId
 createdAt
+knownCount
 ```
 
 This establishes the relationship between the requester and the target independently of individual recipients.
+
+`knownCount` is incremented atomically each time a recipient responds
+"I know" (§7.5) and drives the three-response cutoff for this request.
 
 ---
 
@@ -413,7 +417,13 @@ targetId
 candidateId
 presenceAtPing
 createdAt
+channel
+messageTs
 ```
+
+`channel` and `messageTs` are recorded for every sent recipient message —
+hand-picked or broadcast — so the message can be rewritten via
+`chat.update` when the three-response cutoff is reached (§7.5).
 
 Optional contextual metadata may include the signal that caused the candidate to be surfaced, where useful for internal analysis.
 
@@ -439,6 +449,7 @@ pingId
 outcome
 respondedAt
 responseLatencySeconds
+location
 ```
 
 The outcome vocabulary should reflect the actual recipient actions.
@@ -450,14 +461,18 @@ I know
     ↓
 positive/helpful outcome
 
-Don't know
+I don't know
     ↓
 explicit negative outcome
 
-Reply with more
+Custom message
     ↓
 free-text response
 ```
+
+`location` is a new free-text field added for the detail collected by the
+"I know" modal (§7.1). The previous outcome schema had no place for it,
+so it extends `ping_outcomes` rather than replacing the existing model.
 
 A timeout/no-response state may be recorded separately from an explicit negative response.
 
@@ -516,31 +531,44 @@ Every outgoing Reach message contains the same three recipient-side actions.
 
 ### 7.1 "I know"
 
-Records a positive outcome.
+Opens a small one-field modal: a single-line `plain_text_input`
+(`block_id` `location`, `action_id` `location_input`) asking where or how
+the target can be reached.
 
-The implementation may open a small one-field modal requesting useful information such as where/how the target can be reached.
+On submit the handler:
 
-That information is then relayed to the requester.
+1. Records the positive outcome, storing the collected detail in the
+   outcome's `location` field (§6.3).
+2. Relays that detail to the requester as a DM.
+3. Runs the three-response cutoff check (§7.5).
 
-The product direction currently leans toward collecting the useful detail rather than silently recording the positive outcome.
+The collected detail is the actually useful part for the requester, so
+"I know" always prompts for it rather than logging a silent positive.
 
 ---
 
-### 7.2 "Don't know"
+### 7.2 "I don't know"
 
-Records an explicit negative outcome.
+A plain button with no modal; records an explicit negative outcome
+immediately, using the same recording flow as before.
 
 This is different from receiving no response.
 
-The event contributes to the historical outcome data used by the v2 learning system.
+The event contributes to the historical outcome data used by the v2
+learning system.
+
+It does not interact with the response limit — only "I know" responses
+count toward it (§7.5).
 
 ---
 
-### 7.3 "Reply with more"
+### 7.3 "Custom message"
 
 Opens a one-field modal for free-text input.
 
 The response is relayed to the original requester as a DM.
+
+It does not count toward the response limit (§7.5).
 
 ---
 
@@ -564,6 +592,31 @@ flowchart TD
     E --> J["Free-text modal"]
     J --> K["Relay response to requester"]
 ```
+
+### 7.5 Three-response cutoff
+
+After three "I know" responses for a single reach request, the remaining
+open recipient messages for that request stop offering the response
+buttons.
+
+* The counter lives on the reach request (one count per `reach_request_id`,
+  never global, never per-message).
+* Increment-and-check is a single atomic statement at the data layer
+  (e.g. `UPDATE ... SET known_count = known_count + 1 RETURNING
+  known_count`), so two near-simultaneous "I know" responses cannot both
+  count themselves under the limit.
+* Slack buttons cannot be disabled natively. When the cutoff is reached,
+  each still-open message for that request is rewritten with
+  `chat.update` into one plain-text status line (e.g. "Someone already
+  confirmed a location for this — thanks!"). This requires the channel
+  and message timestamp of every sent recipient message — hand-picked or
+  broadcast — to be stored on its ping record (§6.2).
+* The "I know" modal submit handler re-checks the count on submit, so a
+  click that races past the cutoff sees the friendly status instead of
+  recording a duplicate response. Only responses counted under the limit
+  are recorded.
+* The cutoff applies identically to hand-picked and broadcast recipients;
+  broadcast recipients are never special-cased.
 
 ---
 
@@ -717,11 +770,15 @@ The outgoing message exposes:
 
 ```text
 I know
-Don't know
-Reply with more
+I don't know
+Custom message
 ```
 
 Each action is associated with its corresponding `Ping`.
+
+The channel and message timestamp of every sent message are stored on
+its ping so the message can be rewritten when the cutoff (§7.5) is
+reached.
 
 The action handler must be able to identify:
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -14,6 +15,7 @@ class ReachRequest:
     requester_id: str
     target_id: str
     created_at: datetime
+    known_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,8 @@ class Ping:
     presence_at_ping: str
     created_at: datetime
     reach_request_id: str = ""
+    channel: str = ""
+    message_ts: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,7 @@ class PingOutcome:
     outcome: str
     responded_at: datetime | None = None
     response_latency_seconds: int | None = None
+    location: str | None = None
 
 
 class ReachRepository(Protocol):
@@ -50,6 +55,20 @@ class ReachRepository(Protocol):
     ) -> Ping: ...
     def record_outcome(self, outcome: PingOutcome) -> None: ...
     def get_ping(self, ping_id: str) -> Ping | None: ...
+    def get_outcome(self, ping_id: str) -> PingOutcome | None: ...
+
+    def set_ping_delivery(self, ping_id: str, channel: str, message_ts: str) -> None:
+        """Store where a sent recipient message lives so it can be edited later."""
+        ...
+
+    def increment_known_count(self, reach_request_id: str) -> int:
+        """Atomically count one more "I know" response and return the new count."""
+        ...
+
+    def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
+        """Delivered pings for a request that have not produced an outcome yet."""
+        ...
+
     def affinities(self, target_id: str) -> dict[str, Affinity]: ...
 
 
@@ -63,6 +82,8 @@ class MemoryRepository:
         self.reach_requests: list[ReachRequest] = []
         self.pings: list[Ping] = []
         self.outcomes: dict[str, PingOutcome] = {}
+        self._known_counts: dict[str, int] = {}
+        self._count_lock = threading.Lock()
 
     def create_reach_request(self, requester_id: str, target_id: str) -> ReachRequest:
         request = ReachRequest(str(uuid4()), requester_id, target_id, datetime.now(UTC))
@@ -96,6 +117,32 @@ class MemoryRepository:
 
     def get_ping(self, ping_id: str) -> Ping | None:
         return next((ping for ping in self.pings if ping.id == ping_id), None)
+
+    def get_outcome(self, ping_id: str) -> PingOutcome | None:
+        return self.outcomes.get(ping_id)
+
+    def set_ping_delivery(self, ping_id: str, channel: str, message_ts: str) -> None:
+        self.pings = [
+            replace(ping, channel=channel, message_ts=message_ts)
+            if ping.id == ping_id
+            else ping
+            for ping in self.pings
+        ]
+
+    def increment_known_count(self, reach_request_id: str) -> int:
+        with self._count_lock:
+            count = self._known_counts.get(reach_request_id, 0) + 1
+            self._known_counts[reach_request_id] = count
+        return count
+
+    def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
+        return [
+            ping
+            for ping in self.pings
+            if ping.reach_request_id == reach_request_id
+            and ping.message_ts
+            and ping.id not in self.outcomes
+        ]
 
     def affinities(self, target_id: str) -> dict[str, Affinity]:
         return {}
@@ -182,12 +229,13 @@ class PostgresRepository:
             cursor.execute(
                 """
                 INSERT INTO ping_outcomes
-                  (id, ping_id, outcome, responded_at, response_latency_seconds)
-                VALUES (%s, %s, %s, %s, %s)
+                  (id, ping_id, outcome, responded_at, response_latency_seconds, location)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (ping_id) DO UPDATE SET
                   outcome = EXCLUDED.outcome,
                   responded_at = EXCLUDED.responded_at,
-                  response_latency_seconds = EXCLUDED.response_latency_seconds
+                  response_latency_seconds = EXCLUDED.response_latency_seconds,
+                  location = EXCLUDED.location
                 """,
                 (
                     str(uuid4()),
@@ -195,6 +243,7 @@ class PostgresRepository:
                     outcome.outcome,
                     outcome.responded_at,
                     outcome.response_latency_seconds,
+                    outcome.location,
                 ),
             )
         self.connection.commit()
@@ -204,7 +253,7 @@ class PostgresRepository:
             cursor.execute(
                 """
                 SELECT id, requester_id, target_id, candidate_id, channel_context,
-                       presence_at_ping, created_at, reach_request_id
+                       presence_at_ping, created_at, reach_request_id, channel, message_ts
                 FROM pings WHERE id = %s
                 """,
                 (ping_id,),
@@ -213,6 +262,63 @@ class PostgresRepository:
         if row is None:
             return None
         return Ping(*row)
+
+    def get_outcome(self, ping_id: str) -> PingOutcome | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT outcome, responded_at, response_latency_seconds, location
+                FROM ping_outcomes WHERE ping_id = %s
+                """,
+                (ping_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return PingOutcome(ping_id, *row)
+
+    def set_ping_delivery(self, ping_id: str, channel: str, message_ts: str) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE pings SET channel = %s, message_ts = %s WHERE id = %s
+                """,
+                (channel, message_ts, ping_id),
+            )
+        self.connection.commit()
+
+    def increment_known_count(self, reach_request_id: str) -> int:
+        """Single-statement increment-and-check; safe against races."""
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE reach_requests SET known_count = known_count + 1
+                WHERE id = %s
+                RETURNING known_count
+                """,
+                (reach_request_id,),
+            )
+            row = cursor.fetchone()
+        self.connection.commit()
+        return int(row[0]) if row is not None else 0
+
+    def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, requester_id, target_id, candidate_id, channel_context,
+                       presence_at_ping, created_at, reach_request_id, channel, message_ts
+                FROM pings
+                WHERE reach_request_id = %s
+                  AND message_ts <> ''
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ping_outcomes WHERE ping_id = pings.id
+                  )
+                """,
+                (reach_request_id,),
+            )
+            rows = cursor.fetchall()
+        return [Ping(*row) for row in rows]
 
     def affinities(self, target_id: str) -> dict[str, Affinity]:
         with self.connection.cursor() as cursor:

@@ -93,7 +93,13 @@ def do_rank(target_id: str, requester_id: str) -> RankedCandidates:
     )
 
 
-register_handlers(slack_app, repository=repository, ranker=do_rank, renderer=render_suggestions)
+register_handlers(
+    slack_app,
+    repository=repository,
+    ranker=do_rank,
+    renderer=render_suggestions,
+    known_response_limit=settings.known_response_limit,
+)
 
 
 @api.get("/health")
