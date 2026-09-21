@@ -612,46 +612,110 @@ flowchart TD
     J --> K["Relay response to requester"]
 ```
 
-### 7.5 Three-response cutoff
+### 7.5 Response-limit closure: two independent pools
 
-After three "I know" responses for a single reach request, the remaining
-open recipient messages for that request stop offering the response
-buttons.
+Message closure is governed by **two independent pools with two entirely
+separate counter systems**. They share no counter, no query, and no sweep,
+and there is deliberately **no cross-influence in either direction**. This
+decoupling is explicit so a future maintainer does not accidentally
+reintroduce a shared counter between them.
+
+#### Pool 1 — manual/hand-picked DM recipients
+
+After three "I know" responses from manual DM recipients for a single
+reach request, the remaining open **DM** messages for that request stop
+offering the response buttons.
 
 * The counter lives on the reach request (one count per `reach_request_id`,
-  never global, never per-message).
+  never global, never per-message) and counts **only "I know" responses
+  from manual/hand-picked DM recipients**.
 * Increment-and-check is a single atomic statement at the data layer
   (e.g. `UPDATE ... SET known_count = known_count + 1 RETURNING
   known_count`), so two near-simultaneous "I know" responses cannot both
   count themselves under the limit.
 * Slack buttons cannot be disabled natively. When the cutoff is reached,
-  each still-open message for that request is rewritten with
+  each still-open **DM** message for that request is rewritten with
   `chat.update` into one plain-text status line (e.g. "Someone already
   confirmed a location for this — thanks!"). This requires the channel
-  and message timestamp of every sent recipient message — hand-picked or
-  broadcast — to be stored on its ping record (§6.2).
+  and message timestamp of every sent DM message to be stored on its ping
+  record (§6.2).
 * The "I know" modal submit handler re-checks the count on submit, so a
   click that races past the cutoff sees the friendly status instead of
   recording a duplicate response. Only responses counted under the limit
   are recorded.
-* The cutoff applies identically to hand-picked and broadcast recipients;
-  broadcast recipients are never special-cased.
+* **The DM sweep excludes broadcast pings entirely** (the data-layer
+  lookup filters `candidate_id = ''`): the global threshold can never
+  close a broadcast message.
 
-### 7.6 Per-recipient cleanup
+#### Pool 2 — broadcast messages (per-message local thresholds)
 
-Every response type ("I know", "I don't know", "Custom message") triggers
-the same self-update behavior on the responder's own message:
+Each broadcast message (channel/workspace post; one ping per posted
+channel, `candidate_id = ''`) carries its own local, independent counters,
+keyed by the same reach-request + channel + message-ts record used for
+delivery — never tied to the DM global counter:
 
-* After recording the response, the handler uses `chat.update` to remove
-  the `actions` block from that recipient's message and replace it with a
-  short thank-you line (e.g. "Thanks for your response!").
+* `local_know_count` — increments only on "I know" responses to this
+  message.
+* `local_total_count` — increments on ANY response type to this message
+  ("I know", "I don't know", "Custom message" all count).
+
+The message closes (buttons removed, replaced with the same status line,
+single `chat.update`) when EITHER:
+
+* (a) `local_know_count` reaches 3, OR
+* (b) `local_total_count` reaches 5,
+
+whichever happens first. 3 "I know" responses alone close it even if
+total responses are fewer than 5; alternatively, up to 2 "I don't
+know"/"Custom message" responses are tolerated before the 5-total cap
+forces closure regardless of how many were "I know" at that point. Both
+counts keep incrementing after that; the **first response that makes
+either condition true is the closing trigger** — both conditions are
+checked after every single increment, and a message never silently
+exceeds 5 total or 3 "I know" while still showing live buttons.
+
+Both counts increment atomically (the same atomic increment-and-check
+pattern as the DM global counter, applied per-message) so two
+near-simultaneous responses on the same broadcast message cannot both
+read a stale count.
+
+A first response — or any response below both local thresholds — never
+closes a broadcast message, and broadcast responses never touch the
+DM-side global counter.
+
+### 7.6 Per-responder acknowledgment & cleanup
+
+Acknowledgment differs by pool, because a DM message has one recipient
+while a broadcast message is shared by everyone in the channel.
+
+**Pool 1 — manual DM recipients (visible in-place cleanup):**
+
+* Every response type ("I know", "I don't know", "Custom message")
+  triggers the same self-update on the responder's own DM message: the
+  handler uses `chat.update` to remove the `actions` block and replace it
+  with a short thank-you line (e.g. "Thanks for your response!").
 * This cleanup uses the stored `channel` and `message_ts` from the ping
   record (§6.2), just like the threshold sweep does.
 * The thank-you formatting is shared across all three response types to
   maintain visual consistency.
 
-The purpose of this cleanup is to give recipients immediate feedback that
-their response was registered, preventing confusion or duplicate responses.
+**Pool 2 — broadcast recipients (ephemeral-only acknowledgment):**
+
+* Every response type on a broadcast message gets a per-responder
+  **ephemeral acknowledgment** via `chat.postEphemeral` — visible only to
+  that responder, never a visible message edit.
+* For button responses ("I don't know"), the channel comes from the
+  block_actions payload (`channel_id`).
+* For modal responses ("I know", "Custom message"), the channel is
+  threaded through the modal's `private_metadata` at render time, since
+  modal submissions carry no channel context of their own.
+* Broadcast messages are never edited in place for an individual
+  responder; the only visible edit is the closure status line from a
+  local threshold trip (§7.5, Pool 2).
+
+The purpose in both pools is the same: give responders immediate feedback
+that their response was registered, preventing confusion or duplicate
+responses.
 
 #### Duplicate-click guard
 
@@ -659,8 +723,10 @@ All three response handlers check for an existing outcome before recording
 or applying cleanup:
 
 * If `get_outcome(ping_id)` returns any outcome (regardless of type),
-  the handler responds with a friendly ephemeral note (e.g. "You've already
-  responded to this — thanks!") and skips both recording and cleanup.
+  the handler responds with a friendly note and skips both recording and
+  any message update: ephemeral-only on a broadcast message (never a
+  visible re-update of a closed message), the existing friendly DM note
+  on a DM.
 * This guard prevents double-recording and double-updating if a recipient
   clicks a stale button or submits a modal multiple times.
 * The guard is type-agnostic: it checks for any response, not just the
@@ -668,16 +734,18 @@ or applying cleanup:
 
 #### Threshold sweep interaction
 
-When the three-response cutoff fires (§7.5), the sweep that replaces open
-messages with the cutoff status must skip messages that have already been
-closed by ANY response type:
+The two pools interact with sweeps as follows:
 
-* The sweep uses `get_unresponded_pings(reach_request_id)`, which now
-  excludes pings that have ANY outcome recorded (not just "I know").
-* This ensures that a message already closed via "I don't know" or "Custom
-  message" is not overwritten by the cutoff sweep.
-* The triggering responder's message is never double-updated because the
-  cutoff check happens before the self-update in the "I know" handler.
+* The **DM global sweep** (Pool 1) fires on the hunt-wide 3-"I know"
+  threshold and uses `get_unresponded_pings(reach_request_id)`, which
+  excludes both pings with ANY outcome recorded and all broadcast pings
+  (`candidate_id = ''`). It can therefore only ever rewrite manual DM
+  messages, never a broadcast message.
+* The **broadcast closure** (Pool 2) is not a sweep: the single closing
+  response applies one `chat.update` to its own message only, after
+  checking its local counters atomically. The triggering responder's
+  message is never double-updated because the closure check happens
+  before the ack/update sequence.
 
 ---
 

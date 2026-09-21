@@ -6,9 +6,9 @@ Reach'em is a Slack bot that helps a requester reach the smallest useful audienc
 
 - **Manual recipient selection**: Requesters pick specific people to reach via a multi-user picker
 - **Broadcast scopes**: Option to reach everyone in a channel or the entire workspace  
-- **Per-recipient cleanup**: Respondents' messages are updated with a thank-you line after they respond
+- **Per-responder acknowledgment**: DM respondents see an in-place thank-you edit; broadcast respondents get an ephemeral (only-visible-to-them) acknowledgment
 - **Three response types**: "I know", "I don't know", and "Custom message" for easy feedback
-- **Response cutoff**: Stops asking for help after 3 people confirm they know where the target is
+- **Two independent closure pools**: manual DM messages close via a hunt-wide 3-"I know" threshold; each broadcast message closes via its own local thresholds (3 "I know" OR 5 total responses, whichever first) — the two counter systems are fully decoupled
 - **Privacy-first**: Never posts to public channels, reads private DMs, or displays affinity scores
 
 ## Slack App Setup
