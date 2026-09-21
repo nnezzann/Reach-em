@@ -34,6 +34,13 @@ class Ping:
     reach_request_id: str = ""
     channel: str = ""
     message_ts: str = ""
+    # Broadcast-only closure counters (Pool 2). Broadcast pings are exactly
+    # those with candidate_id == "" (one ping per posted channel); DM pings
+    # (Pool 1) never touch these — they close via the hunt-wide global
+    # known_count on reach_requests instead. The two pools are independent:
+    # no shared counter, no cross-influence in either direction.
+    local_know_count: int = 0
+    local_total_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -66,11 +73,35 @@ class ReachRepository(Protocol):
         ...
 
     def increment_known_count(self, reach_request_id: str) -> int:
-        """Atomically count one more "I know" response and return the new count."""
+        """Atomically count one more "I know" response and return the new count.
+
+        Pool 1 (manual/hand-picked DM recipients) only — broadcast responses
+        must never touch this counter.
+        """
+        ...
+
+    def increment_broadcast_counts(
+        self, ping_id: str, counts_toward_known: bool
+    ) -> tuple[int, int]:
+        """Atomically bump a broadcast message's local counters.
+
+        Pool 2 (broadcast channel/workspace posts) only — entirely separate
+        from the DM-side global counter. ``local_total_count`` increments on
+        every response type; ``local_know_count`` only when
+        ``counts_toward_known`` is True. Returns the post-increment
+        ``(local_know_count, local_total_count)`` pair in one atomic
+        statement so two near-simultaneous responses on the same broadcast
+        message cannot both read a stale count.
+        """
         ...
 
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
-        """Delivered pings for a request that have not produced an outcome yet."""
+        """Delivered DM pings for a request that have not produced an outcome yet.
+
+        Deliberately excludes broadcast pings: the DM global-threshold sweep
+        may only ever close manual/hand-picked DM messages. Broadcast
+        messages are closed exclusively by their own local thresholds.
+        """
         ...
 
     def known_count(self, reach_request_id: str) -> int:
@@ -91,6 +122,7 @@ class MemoryRepository:
         self.pings: list[Ping] = []
         self.outcomes: dict[str, PingOutcome] = {}
         self._known_counts: dict[str, int] = {}
+        self._local_counts: dict[str, tuple[int, int]] = {}
         self._count_lock = threading.Lock()
 
     def create_reach_request(self, requester_id: str, target_id: str) -> ReachRequest:
@@ -146,12 +178,25 @@ class MemoryRepository:
     def known_count(self, reach_request_id: str) -> int:
         return self._known_counts.get(reach_request_id, 0)
 
+    def increment_broadcast_counts(
+        self, ping_id: str, counts_toward_known: bool
+    ) -> tuple[int, int]:
+        with self._count_lock:
+            know, total = self._local_counts.get(ping_id, (0, 0))
+            know = know + 1 if counts_toward_known else know
+            total += 1
+            self._local_counts[ping_id] = (know, total)
+        return know, total
+
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
+        # candidate_id == "" marks a broadcast ping; the DM-side global
+        # sweep must never close those (they own their local thresholds).
         return [
             ping
             for ping in self.pings
             if ping.reach_request_id == reach_request_id
             and ping.message_ts
+            and ping.candidate_id != ""
             and ping.id not in self.outcomes
         ]
 
@@ -283,7 +328,8 @@ class PostgresRepository:
             cursor.execute(
                 """
                 SELECT id, requester_id, target_id, candidate_id, channel_context,
-                       presence_at_ping, created_at, reach_request_id, channel, message_ts
+                       presence_at_ping, created_at, reach_request_id, channel, message_ts,
+                       local_know_count, local_total_count
                 FROM pings WHERE id = %s
                 """,
                 (ping_id,),
@@ -341,15 +387,42 @@ class PostgresRepository:
             row = cursor.fetchone()
         return int(row[0]) if row is not None else 0
 
+    def increment_broadcast_counts(
+        self, ping_id: str, counts_toward_known: bool
+    ) -> tuple[int, int]:
+        """Single-statement atomic increment-and-check for one broadcast message."""
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE pings
+                SET local_know_count = local_know_count + %s,
+                    local_total_count = local_total_count + 1
+                WHERE id = %s
+                RETURNING local_know_count, local_total_count
+                """,
+                (1 if counts_toward_known else 0, ping_id),
+            )
+            row = cursor.fetchone()
+        self.connection.commit()
+        if row is None:
+            return 0, 0
+        return int(row[0]), int(row[1])
+
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
+        # candidate_id <> '' excludes broadcast pings: this lookup feeds the
+        # DM-side global-threshold sweep, which must only ever close
+        # manual/hand-picked DM messages. Broadcast messages are closed
+        # exclusively by their own local thresholds.
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT id, requester_id, target_id, candidate_id, channel_context,
-                       presence_at_ping, created_at, reach_request_id, channel, message_ts
+                       presence_at_ping, created_at, reach_request_id, channel, message_ts,
+                       local_know_count, local_total_count
                 FROM pings
                 WHERE reach_request_id = %s
                   AND message_ts <> ''
+                  AND candidate_id <> ''
                   AND NOT EXISTS (
                       SELECT 1 FROM ping_outcomes WHERE ping_id = pings.id
                   )
