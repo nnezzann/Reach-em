@@ -85,7 +85,10 @@ def test_post_to_channels_posts_to_selected_channels() -> None:
     assert posted == 2
     assert sorted(message["channel"] for message in client.sent) == ["C1", "C2"]
     text = client.sent[0]["text"]
-    assert "Reach, relaying for <@U-requester> about <@U-target>" in text
+    assert (
+        "<!channel> Yo, Reach'em here, <@U-requester> needs a quick word with "
+        "<@U-target> (s)He says:"
+    ) in text
     assert text.startswith("<!channel>")
     actions = client.sent[0]["blocks"][1]["elements"]
     assert [element["action_id"] for element in actions] == [

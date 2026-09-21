@@ -21,7 +21,10 @@ def broadcast_text(message: str, requester_id: str, target_id: str) -> str:
     `<!channel>` (NOT `<@channel>` — that is a literal user mention and will
     not notify anyone) is used for public-channel broadcast posts only.
     """
-    return f"<!channel> Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
+    return (
+        f"<!channel> Yo, Reach'em here, <@{requester_id}> needs a quick word with "
+        f"<@{target_id}> (s)He says:\n{message}"
+    )
 
 
 def dm_text(message: str, requester_id: str, target_id: str) -> str:

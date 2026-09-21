@@ -269,7 +269,10 @@ def register_handlers(
         await ack()
         request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
         hand_picked = [user for user in candidates if user not in {target_id, requester_id}]
-        text_hand_picked = f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
+        text_hand_picked = (
+            f"Yo, Reach'em here, <@{requester_id}> needs a quick talk with  "
+            f"<@{target_id}>:\n{message}"
+        )
         for candidate_id in hand_picked:
             # Suggestions are dormant: no computed channel context or
             # presence exists for hand-picked recipients.
@@ -579,8 +582,8 @@ def register_handlers(
                 await client.chat_postMessage(
                     channel=ping.requester_id,
                     text=(
-                        f"<@{responder_id}> (in the broadcast) knows how to reach "
-                        f"<@{ping.target_id}>: {location}"
+                        f"<@{responder_id}> knows how to reach "
+                        f"<@{ping.target_id}> (s)He says:\n {location}"
                     ),
                 )
             # Ephemeral ack to the responder; broadcast messages are never
@@ -608,7 +611,7 @@ def register_handlers(
                 channel=ping.requester_id,
                 text=(
                     f"<@{ping.candidate_id}> knows how to reach "
-                    f"<@{ping.target_id}>: {location}"
+                    f"<@{ping.target_id}> (s)He says:\n {location}"
                 ),
             )
         await _apply_response_cleanup(client, ping)

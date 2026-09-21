@@ -229,7 +229,7 @@ def test_submission_sends_message_to_selected_recipients() -> None:
 
     assert len(client.sent) == 1
     text = client.sent[0]["text"]
-    assert "Reach, relaying for <@U-requester> about <@U-target>" in text
+    assert "Yo, Reach'em here, <@U-requester> needs a quick talk with  <@U-target>" in text
     assert "Anyone seen them?" in text
     assert client.sent[0]["blocks"][0]["type"] == "section"
     actions = client.sent[0]["blocks"][1]["elements"]
@@ -558,7 +558,10 @@ def test_stage3_submit_launches_channel_broadcast() -> None:
     assert repo.pings == [""]
     assert repo.contexts == ["broadcast"]
     assert client.sent[0]["channel"] == "C1"
-    assert "Reach, relaying for <@U-requester> about <@U-target>" in client.sent[0]["text"]
+    assert (
+        "<!channel> Yo, Reach'em here, <@U-requester> needs a quick word with "
+        "<@U-target> (s)He says:"
+    ) in client.sent[0]["text"]
     assert client.sent[0]["text"].startswith("<!channel>")
     actions = client.sent[0]["blocks"][1]["elements"]
     assert [element["action_id"] for element in actions] == [
