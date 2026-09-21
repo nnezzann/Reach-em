@@ -668,20 +668,26 @@ single `chat.update`) when EITHER:
 whichever happens first. 3 "I know" responses alone close it even if
 total responses are fewer than 5; alternatively, up to 2 "I don't
 know"/"Custom message" responses are tolerated before the 5-total cap
-forces closure regardless of how many were "I know" at that point. Both
-counts keep incrementing after that; the **first response that makes
-either condition true is the closing trigger** — both conditions are
-checked after every single increment, and a message never silently
-exceeds 5 total or 3 "I know" while still showing live buttons.
+forces closure regardless of how many were "I know" at that point. The
+**first response that makes either condition true is the closing trigger**
+— both conditions are checked after every single increment, and a message
+never silently exceeds 5 total or 3 "I know" while still showing live
+buttons.
 
 Both counts increment atomically (the same atomic increment-and-check
 pattern as the DM global counter, applied per-message) so two
 near-simultaneous responses on the same broadcast message cannot both
-read a stale count.
+read a stale count. The first update that reaches either threshold also
+claims closure atomically; later responses do not increment the counters
+or run another `chat.update`, and receive only the closed-message
+ephemeral note. Each responder has an independent duplicate-response
+record because one broadcast ping represents a shared channel message.
 
 A first response — or any response below both local thresholds — never
 closes a broadcast message, and broadcast responses never touch the
-DM-side global counter.
+DM-side global counter. When a broadcast message closes, the requester
+also receives one DM identifying the channel and the local know/total
+counts; this is separate from any DM relaying an individual reply.
 
 ### 7.6 Per-responder acknowledgment & cleanup
 

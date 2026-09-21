@@ -41,6 +41,7 @@ class Ping:
     # no shared counter, no cross-influence in either direction.
     local_know_count: int = 0
     local_total_count: int = 0
+    broadcast_closed: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,7 +83,7 @@ class ReachRepository(Protocol):
 
     def increment_broadcast_counts(
         self, ping_id: str, counts_toward_known: bool
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, bool]:
         """Atomically bump a broadcast message's local counters.
 
         Pool 2 (broadcast channel/workspace posts) only — entirely separate
@@ -91,9 +92,16 @@ class ReachRepository(Protocol):
         ``counts_toward_known`` is True. Returns the post-increment
         ``(local_know_count, local_total_count)`` pair in one atomic
         statement so two near-simultaneous responses on the same broadcast
-        message cannot both read a stale count.
+        message cannot both read a stale count. The bool is true only for
+        the response that atomically closes the message.
         """
         ...
+
+    def record_broadcast_response(
+        self, ping_id: str, responder_id: str, outcome: PingOutcome
+    ) -> bool: ...
+
+    def broadcast_is_closed(self, ping_id: str) -> bool: ...
 
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
         """Delivered DM pings for a request that have not produced an outcome yet.
@@ -123,6 +131,8 @@ class MemoryRepository:
         self.outcomes: dict[str, PingOutcome] = {}
         self._known_counts: dict[str, int] = {}
         self._local_counts: dict[str, tuple[int, int]] = {}
+        self._broadcast_responses: set[tuple[str, str]] = set()
+        self._broadcast_closed: set[str] = set()
         self._count_lock = threading.Lock()
 
     def create_reach_request(self, requester_id: str, target_id: str) -> ReachRequest:
@@ -180,13 +190,32 @@ class MemoryRepository:
 
     def increment_broadcast_counts(
         self, ping_id: str, counts_toward_known: bool
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, bool]:
         with self._count_lock:
             know, total = self._local_counts.get(ping_id, (0, 0))
+            if ping_id in self._broadcast_closed:
+                return know, total, False
             know = know + 1 if counts_toward_known else know
             total += 1
             self._local_counts[ping_id] = (know, total)
-        return know, total
+            closed = know >= 3 or total >= 5
+            if closed:
+                self._broadcast_closed.add(ping_id)
+        return know, total, closed
+
+    def record_broadcast_response(
+        self, ping_id: str, responder_id: str, outcome: PingOutcome
+    ) -> bool:
+        with self._count_lock:
+            key = (ping_id, responder_id)
+            if key in self._broadcast_responses or ping_id in self._broadcast_closed:
+                return False
+            self._broadcast_responses.add(key)
+        return True
+
+    def broadcast_is_closed(self, ping_id: str) -> bool:
+        with self._count_lock:
+            return ping_id in self._broadcast_closed
 
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
         # candidate_id == "" marks a broadcast ping; the DM-side global
@@ -329,7 +358,7 @@ class PostgresRepository:
                 """
                 SELECT id, requester_id, target_id, candidate_id, channel_context,
                        presence_at_ping, created_at, reach_request_id, channel, message_ts,
-                       local_know_count, local_total_count
+                       local_know_count, local_total_count, broadcast_closed
                 FROM pings WHERE id = %s
                 """,
                 (ping_id,),
@@ -389,24 +418,68 @@ class PostgresRepository:
 
     def increment_broadcast_counts(
         self, ping_id: str, counts_toward_known: bool
-    ) -> tuple[int, int]:
-        """Single-statement atomic increment-and-check for one broadcast message."""
+    ) -> tuple[int, int, bool]:
+        """Single-statement atomic increment and closure claim."""
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
                 UPDATE pings
                 SET local_know_count = local_know_count + %s,
-                    local_total_count = local_total_count + 1
-                WHERE id = %s
-                RETURNING local_know_count, local_total_count
+                    local_total_count = local_total_count + 1,
+                    broadcast_closed = (
+                        local_know_count + %s >= 3
+                        OR local_total_count + 1 >= 5
+                    )
+                WHERE id = %s AND NOT broadcast_closed
+                RETURNING local_know_count, local_total_count, broadcast_closed
                 """,
-                (1 if counts_toward_known else 0, ping_id),
+                (
+                    1 if counts_toward_known else 0,
+                    1 if counts_toward_known else 0,
+                    ping_id,
+                ),
             )
             row = cursor.fetchone()
         self.connection.commit()
         if row is None:
-            return 0, 0
-        return int(row[0]), int(row[1])
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT local_know_count, local_total_count FROM pings WHERE id = %s",
+                    (ping_id,),
+                )
+                current = cursor.fetchone()
+            return (int(current[0]), int(current[1]), False) if current else (0, 0, False)
+        return int(row[0]), int(row[1]), bool(row[2])
+
+    def record_broadcast_response(
+        self, ping_id: str, responder_id: str, outcome: PingOutcome
+    ) -> bool:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO broadcast_responses
+                  (id, ping_id, responder_id, outcome, responded_at, location)
+                SELECT %s, %s, %s, %s, %s, %s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM pings WHERE id = %s AND broadcast_closed
+                )
+                ON CONFLICT (ping_id, responder_id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    str(uuid4()), ping_id, responder_id, outcome.outcome,
+                    outcome.responded_at, outcome.location, ping_id,
+                ),
+            )
+            inserted = cursor.fetchone() is not None
+        self.connection.commit()
+        return inserted
+
+    def broadcast_is_closed(self, ping_id: str) -> bool:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT broadcast_closed FROM pings WHERE id = %s", (ping_id,))
+            row = cursor.fetchone()
+        return bool(row[0]) if row else False
 
     def get_unresponded_pings(self, reach_request_id: str) -> list[Ping]:
         # candidate_id <> '' excludes broadcast pings: this lookup feeds the
@@ -418,7 +491,7 @@ class PostgresRepository:
                 """
                 SELECT id, requester_id, target_id, candidate_id, channel_context,
                        presence_at_ping, created_at, reach_request_id, channel, message_ts,
-                       local_know_count, local_total_count
+                       local_know_count, local_total_count, broadcast_closed
                 FROM pings
                 WHERE reach_request_id = %s
                   AND message_ts <> ''

@@ -896,6 +896,8 @@ class BroadcastRepo:
         self.recorded: list[str] = []
         self.bumped: list[tuple[str, bool]] = []
         self.global_increments: list[str] = []
+        self.broadcast_responses: set[str] = set()
+        self.closed = False
 
     def get_ping(self, ping_id: str) -> Any:
         if ping_id != self.ping.id:
@@ -919,12 +921,27 @@ class BroadcastRepo:
 
     def increment_broadcast_counts(
         self, ping_id: str, counts_toward_known: bool
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, bool]:
         self.bumped.append((ping_id, counts_toward_known))
         know, total = self.local
+        if self.closed:
+            return know, total, False
         know = know + 1 if counts_toward_known else know
         self.local = (know, total + 1)
-        return self.local
+        closed = know >= 3 or self.local[1] >= 5
+        self.closed = self.closed or closed
+        return (*self.local, closed)
+
+    def record_broadcast_response(self, ping_id: str, responder_id: str, outcome: Any) -> bool:
+        key = f"{ping_id}:{responder_id}"
+        if self.closed or key in self.broadcast_responses:
+            return False
+        self.broadcast_responses.add(key)
+        self.recorded.append(outcome.outcome)
+        return True
+
+    def broadcast_is_closed(self, ping_id: str) -> bool:
+        return self.closed
 
     def increment_known_count(self, reach_request_id: str) -> int:
         # A broadcast response must NEVER touch the DM global counter.
@@ -985,6 +1002,8 @@ def test_broadcast_third_i_know_closes_message() -> None:
     assert [(u["channel"], u["ts"], u["text"]) for u in client.message_updates] == [
         ("C1", "1.0001", CUTOFF_STATUS)
     ]
+    assert client.sent[-1]["channel"] == "U-requester"
+    assert "3 \"I know\" response(s) and 3 total response(s)" in client.sent[-1]["text"]
 
 
 def test_broadcast_fifth_total_response_closes_even_without_three_knows() -> None:
@@ -1065,7 +1084,8 @@ def test_broadcast_responses_use_ephemeral_ack_not_visible_edit() -> None:
 
 
 def test_broadcast_closed_message_click_gets_ephemeral_note_only() -> None:
-    repo = BroadcastRepo(existing_outcome="helped")
+    repo = BroadcastRepo(local=(2, 4))
+    repo.closed = True
     app, client = _register(repository=repo)
 
     async def ack(**kwargs: Any) -> None:
@@ -1086,3 +1106,114 @@ def test_broadcast_closed_message_click_gets_ephemeral_note_only() -> None:
     assert repo.recorded == []  # no duplicate recording
     assert client.message_updates == []  # never re-update a closed message
     assert client.ephemerals == [("C1", "U-responder", CUTOFF_STATUS)]
+
+
+def test_broadcast_three_knows_closes_at_three_with_fewer_than_five_total() -> None:
+    repo = BroadcastRepo()
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    async def respond(user_id: str) -> None:
+        await app.handlers["location_submit"](
+            ack=ack,
+            body={"user": {"id": user_id}},
+            view={
+                "private_metadata": json.dumps({"ping_id": "ping-b1", "channel_id": "C1"}),
+                "state": {"values": {"location": {"location_input": {"value": "Here"}}}},
+            },
+            client=client,
+        )
+
+    async def run_all() -> None:
+        await asyncio.gather(respond("U1"), respond("U2"), respond("U3"))
+
+    asyncio.run(run_all())
+
+    assert repo.local == (3, 3)
+    assert len(client.message_updates) == 1
+    assert len([sent for sent in client.sent if sent["channel"] == "U-requester"]) == 4
+
+
+def test_broadcast_five_total_closes_before_three_knows() -> None:
+    repo = BroadcastRepo()
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    async def unknown(user_id: str) -> None:
+        await app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-b1"})}],
+                "user": {"id": user_id},
+                "channel_id": "C1",
+            },
+            client=client,
+        )
+
+    async def run_all() -> None:
+        await asyncio.gather(*(unknown(f"U{i}") for i in range(1, 6)))
+
+    asyncio.run(run_all())
+
+    assert repo.local == (0, 5)
+    assert len(client.message_updates) == 1
+    assert "0 \"I know\" response(s) and 5 total response(s)" in client.sent[-1]["text"]
+
+
+def test_broadcast_concurrent_responses_have_no_lost_increments_or_duplicate_close() -> None:
+    repo = BroadcastRepo()
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    async def unknown(user_id: str) -> None:
+        await app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-b1"})}],
+                "user": {"id": user_id},
+                "channel_id": "C1",
+            },
+            client=client,
+        )
+
+    async def run_all() -> None:
+        await asyncio.gather(*(unknown(f"U{i}") for i in range(1, 8)))
+
+    asyncio.run(run_all())
+
+    assert repo.local == (0, 5)
+    assert len(client.message_updates) == 1
+
+
+def test_broadcast_response_after_closure_does_not_increment_or_update_again() -> None:
+    repo = BroadcastRepo(local=(2, 4))
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    async def unknown(user_id: str) -> None:
+        await app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-b1"})}],
+                "user": {"id": user_id},
+                "channel_id": "C1",
+            },
+            client=client,
+        )
+
+    asyncio.run(unknown("U1"))
+    assert repo.local == (2, 5)
+    assert len(client.message_updates) == 1
+    asyncio.run(unknown("U2"))
+
+    assert repo.local == (2, 5)
+    assert len(client.message_updates) == 1
+    assert client.ephemerals[-1] == ("C1", "U2", CUTOFF_STATUS)

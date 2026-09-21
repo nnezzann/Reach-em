@@ -104,6 +104,39 @@ async def _post_ephemeral(client: Any, channel: str, user_id: str, text: str) ->
         log.error("chat_postEphemeral failed for channel=%s user=%s: %s", channel, user_id, exc)
 
 
+async def _finish_broadcast_response(
+    repository: ReachRepository,
+    client: Any,
+    ping: Ping,
+    responder_id: str,
+    channel: str,
+    counts_toward_known: bool,
+) -> None:
+    """Apply local counters, acknowledge, and perform one closure update."""
+    know, total, closed_now = repository.increment_broadcast_counts(
+        ping.id, counts_toward_known
+    )
+    await _post_ephemeral(
+        client, channel or ping.channel, responder_id, "Thanks for your response!"
+    )
+    if not closed_now or not ping.message_ts:
+        return
+    try:
+        await client.chat_update(channel=ping.channel, ts=ping.message_ts, text=CUTOFF_STATUS)
+    except SlackApiError as exc:
+        log.error("broadcast closure update failed for ping=%s: %s", ping.id, exc)
+    try:
+        await client.chat_postMessage(
+            channel=ping.requester_id,
+            text=(
+                f"The broadcast in <#{ping.channel}> closed after {know} \"I know\" "
+                f"response(s) and {total} total response(s)."
+            ),
+        )
+    except SlackApiError as exc:
+        log.error("broadcast closure notification failed for ping=%s: %s", ping.id, exc)
+
+
 def register_handlers(
     slack_app: Any,
     *,
@@ -405,8 +438,8 @@ def register_handlers(
         is_broadcast = ping.candidate_id == ""
         responder_id = str(body.get("user", {}).get("id", ""))
         channel = _action_channel_id(body) if is_broadcast else ""
-        # Duplicate-click guard: check for any existing outcome
-        if repository.get_outcome(ping_id) is not None:
+        # Duplicate-click guard is per responder for a shared broadcast post.
+        if not is_broadcast and repository.get_outcome(ping_id) is not None:
             if is_broadcast:
                 # Closed-message (or duplicate) click: friendly ephemeral
                 # note only — no recording, no re-update.
@@ -422,28 +455,20 @@ def register_handlers(
                 except SlackApiError as exc:
                     log.error("ephemeral note failed for ping=%s: %s", ping_id, exc)
             return
-        repository.record_outcome(PingOutcome(ping_id, "unknown"))
         if is_broadcast:
-            # Pool 2: bump this message's local counters (atomic) and close
-            # only when a local threshold is met — the first response never
-            # closes a broadcast message, and the DM global counter is
-            # neither read nor written here.
-            know, total = repository.increment_broadcast_counts(ping_id, False)
-            await _post_ephemeral(
-                client, channel or ping.channel, responder_id, "Thanks for your response!"
+            if not repository.record_broadcast_response(
+                ping_id, responder_id, PingOutcome(ping_id, "unknown")
+            ):
+                await _post_ephemeral(
+                    client, channel or ping.channel, responder_id, BROADCAST_CLOSED_NOTE
+                )
+                return
+            await _finish_broadcast_response(
+                repository, client, ping, responder_id, channel, False
             )
-            if (
-                know >= BROADCAST_KNOW_LIMIT
-                or total >= BROADCAST_TOTAL_LIMIT
-            ) and ping.message_ts:
-                try:
-                    await client.chat_update(
-                        channel=ping.channel, ts=ping.message_ts, text=CUTOFF_STATUS
-                    )
-                except SlackApiError as exc:
-                    log.error("broadcast closure update failed for ping=%s: %s", ping.id, exc)
         else:
             # Pool 1 (manual DM): unchanged in-place thank-you cleanup.
+            repository.record_outcome(PingOutcome(ping_id, "unknown"))
             await _apply_response_cleanup(client, ping)
 
     @slack_app.action("outcome_more")  # type: ignore[untyped-decorator]
@@ -472,8 +497,8 @@ def register_handlers(
             return
         is_broadcast = ping.candidate_id == ""
         responder_id = str(body.get("user", {}).get("id", "unknown"))
-        # Duplicate-click guard: check for any existing outcome
-        if repository.get_outcome(ping_id) is not None:
+        # Duplicate-click guard is per responder for a shared broadcast post.
+        if not is_broadcast and repository.get_outcome(ping_id) is not None:
             if is_broadcast:
                 await _post_ephemeral(
                     client, modal_channel or ping.channel, responder_id, BROADCAST_CLOSED_NOTE
@@ -487,30 +512,28 @@ def register_handlers(
                 except SlackApiError as exc:
                     log.error("ephemeral note failed for ping=%s: %s", ping_id, exc)
             return
-        repository.record_outcome(PingOutcome(ping_id, "replied"))
-        # Relay response to requester; for broadcasts, the responder's identity
-        # is the clicker's user (lazy, not a pre-known candidate).
-        await client.chat_postMessage(
-            channel=ping.requester_id,
-            text=f"Reply about <@{ping.target_id}> from <@{responder_id}>:\n{reply}",
-        )
         if is_broadcast:
-            know, total = repository.increment_broadcast_counts(ping_id, False)
-            await _post_ephemeral(
-                client, modal_channel or ping.channel, responder_id, "Thanks for your response!"
+            if not repository.record_broadcast_response(
+                ping_id, responder_id, PingOutcome(ping_id, "replied")
+            ):
+                await _post_ephemeral(
+                    client, modal_channel or ping.channel, responder_id, BROADCAST_CLOSED_NOTE
+                )
+                return
+            await client.chat_postMessage(
+                channel=ping.requester_id,
+                text=f"Reply about <@{ping.target_id}> from <@{responder_id}>:\n{reply}",
             )
-            if (
-                know >= BROADCAST_KNOW_LIMIT
-                or total >= BROADCAST_TOTAL_LIMIT
-            ) and ping.message_ts:
-                try:
-                    await client.chat_update(
-                        channel=ping.channel, ts=ping.message_ts, text=CUTOFF_STATUS
-                    )
-                except SlackApiError as exc:
-                    log.error("broadcast closure update failed for ping=%s: %s", ping.id, exc)
+            await _finish_broadcast_response(
+                repository, client, ping, responder_id, modal_channel, False
+            )
         else:
             # Manual DM: unchanged in-place thank-you cleanup.
+            repository.record_outcome(PingOutcome(ping_id, "replied"))
+            await client.chat_postMessage(
+                channel=ping.requester_id,
+                text=f"Reply about <@{ping.target_id}> from <@{responder_id}>:\n{reply}",
+            )
             await _apply_response_cleanup(client, ping)
 
     @slack_app.view("location_submit")  # type: ignore[untyped-decorator]
@@ -532,7 +555,7 @@ def register_handlers(
         # Re-check on submit: the button may have been clicked before a
         # cutoff that has since been reached, and a ping that already
         # answered must not be counted or recorded twice.
-        if repository.get_outcome(ping_id) is not None:
+        if not is_broadcast and repository.get_outcome(ping_id) is not None:
             if is_broadcast:
                 # Closed broadcast message: friendly ephemeral note only —
                 # never a visible chat.update (the status line, if any, was
@@ -544,18 +567,14 @@ def register_handlers(
                 await _replace_with_cutoff_status(client, ping)
             return
         if is_broadcast:
-            # Pool 2: broadcast responses never touch the DM-side global
-            # counter (increment_known_count) — they bump this message's
-            # own local counters atomically instead.
-            know, total = repository.increment_broadcast_counts(ping_id, True)
-            repository.record_outcome(
-                PingOutcome(
-                    ping_id,
-                    "helped",
-                    responded_at=datetime.now(UTC),
-                    location=location or None,
-                )
+            broadcast_outcome = PingOutcome(
+                ping_id, "helped", responded_at=datetime.now(UTC), location=location or None
             )
+            if not repository.record_broadcast_response(ping_id, responder_id, broadcast_outcome):
+                await _post_ephemeral(
+                    client, modal_channel or ping.channel, responder_id, BROADCAST_CLOSED_NOTE
+                )
+                return
             if location:
                 await client.chat_postMessage(
                     channel=ping.requester_id,
@@ -567,22 +586,9 @@ def register_handlers(
             # Ephemeral ack to the responder; broadcast messages are never
             # edited in place for individual responders (many people share
             # the same message).
-            await _post_ephemeral(
-                client, modal_channel or ping.channel, responder_id, "Thanks for your response!"
+            await _finish_broadcast_response(
+                repository, client, ping, responder_id, modal_channel, True
             )
-            # Close only when a LOCAL threshold is met: 3 "I know" on this
-            # message, or 5 total responses on this message — whichever
-            # happens first. The DM global counter plays no part here.
-            if (
-                know >= BROADCAST_KNOW_LIMIT
-                or total >= BROADCAST_TOTAL_LIMIT
-            ) and ping.message_ts:
-                try:
-                    await client.chat_update(
-                        channel=ping.channel, ts=ping.message_ts, text=CUTOFF_STATUS
-                    )
-                except SlackApiError as exc:
-                    log.error("broadcast closure update failed for ping=%s: %s", ping.id, exc)
             return
         # Pool 1 (manual/hand-picked DM): global hunt-wide counter, unchanged.
         count = repository.increment_known_count(ping.reach_request_id)

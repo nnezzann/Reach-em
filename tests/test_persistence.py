@@ -50,11 +50,11 @@ def test_memory_broadcast_counts_are_per_message_and_independent() -> None:
     ping_b = repo.create_ping(request.id, "U-requester", "U-target", "", "broadcast", "unknown")
 
     # "I know" bumps both counters; other response types bump total only.
-    assert repo.increment_broadcast_counts(ping_a.id, True) == (1, 1)
-    assert repo.increment_broadcast_counts(ping_a.id, False) == (1, 2)
+    assert repo.increment_broadcast_counts(ping_a.id, True) == (1, 1, False)
+    assert repo.increment_broadcast_counts(ping_a.id, False) == (1, 2, False)
     # Each broadcast message owns its counters — no cross-talk, and the
     # request's global DM counter is untouched by any of this.
-    assert repo.increment_broadcast_counts(ping_b.id, False) == (0, 1)
+    assert repo.increment_broadcast_counts(ping_b.id, False) == (0, 1, False)
     assert repo.known_count(request.id) == 0
 
 
