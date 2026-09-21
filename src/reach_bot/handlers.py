@@ -422,7 +422,7 @@ def register_handlers(
                 channel=ping.requester_id,
                 text=(
                     f"<@{ping.candidate_id}> knows how to reach "
-                    f"<@{ping.target_id}>: {location}"
+                    f"<@{ping.target_id}>, (She)He says:\n {location}"
                 ),
             )
         await _apply_response_cleanup(client, ping)
