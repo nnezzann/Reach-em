@@ -1,3 +1,5 @@
+import json
+
 from reach_bot.ranking import Candidate, RankedCandidates
 from reach_bot.rendering import (
     mrkdwn_section,
@@ -139,7 +141,8 @@ def test_location_modal_is_a_single_line_input():
     view = render_location_modal("ping-1")
 
     assert view["callback_id"] == "location_submit"
-    assert view["private_metadata"] == "ping-1"
+    # channel_id threads through private_metadata for broadcast ephemeral acks.
+    assert json.loads(view["private_metadata"]) == {"ping_id": "ping-1", "channel_id": ""}
     block = view["blocks"][0]
     assert block["block_id"] == "location"
     element = block["element"]

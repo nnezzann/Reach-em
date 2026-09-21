@@ -38,6 +38,7 @@ class FakeClient:
         self.updated: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
         self.message_updates: list[dict[str, Any]] = []
+        self.ephemerals: list[tuple[str, str, str]] = []
         self.profiles: dict[str, dict[str, Any]] = {}
         self.channel_members: dict[str, list[str]] = {}
         self.workspace_users: list[dict[str, Any]] = []
@@ -63,6 +64,9 @@ class FakeClient:
 
     async def chat_update(self, **kwargs: Any) -> None:
         self.message_updates.append(kwargs)
+
+    async def chat_postEphemeral(self, *, channel: str, user: str, text: str) -> None:
+        self.ephemerals.append((channel, user, text))
 
 
 class FakeRepository:
@@ -583,7 +587,8 @@ def test_i_know_click_opens_single_line_location_modal() -> None:
 
     view = client.opened[0]["view"]
     assert view["callback_id"] == "location_submit"
-    assert view["private_metadata"] == "ping-1"
+    # channel_id rides through private_metadata for the broadcast ephemeral acks.
+    assert json.loads(view["private_metadata"]) == {"ping_id": "ping-1", "channel_id": ""}
     block = view["blocks"][0]
     assert block["block_id"] == "location"
     assert block["element"]["action_id"] == "location_input"
@@ -861,3 +866,223 @@ def test_reply_more_duplicate_click_shows_ephemeral() -> None:
     assert len(client.sent) == 1
     assert client.sent[0]["text"] == "You've already responded to this — thanks!"
     assert client.message_updates == []  # No cleanup on duplicate
+
+
+# ---------------------------------------------------------------------------
+# Pool 2: broadcast messages (candidate_id == "") — per-message local
+# thresholds, entirely decoupled from the DM-side global counter.
+# ---------------------------------------------------------------------------
+
+
+def _broadcast_ping(**overrides: Any) -> Any:
+    defaults: dict[str, Any] = {
+        "id": "ping-b1",
+        "reach_request_id": "req-1",
+        "requester_id": "U-requester",
+        "target_id": "U-target",
+        "candidate_id": "",  # broadcast marker
+        "channel": "C1",
+        "message_ts": "1.0001",
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class BroadcastRepo:
+    def __init__(self, existing_outcome: Any = None, local: tuple[int, int] = (0, 0)) -> None:
+        self.ping = _broadcast_ping()
+        self.existing_outcome = existing_outcome
+        self.local = local
+        self.recorded: list[str] = []
+        self.bumped: list[tuple[str, bool]] = []
+        self.global_increments: list[str] = []
+
+    def get_ping(self, ping_id: str) -> Any:
+        if ping_id != self.ping.id:
+            return None
+        # Return the stored local counts so closure checks reflect prior
+        # responses on this message.
+        self.ping = SimpleNamespace(
+            **{
+                **self.ping.__dict__,
+                "local_know_count": self.local[0],
+                "local_total_count": self.local[1],
+            }
+        )
+        return self.ping
+
+    def get_outcome(self, ping_id: str) -> Any:
+        return self.existing_outcome
+
+    def record_outcome(self, outcome: Any) -> None:
+        self.recorded.append(outcome.outcome)
+
+    def increment_broadcast_counts(
+        self, ping_id: str, counts_toward_known: bool
+    ) -> tuple[int, int]:
+        self.bumped.append((ping_id, counts_toward_known))
+        know, total = self.local
+        know = know + 1 if counts_toward_known else know
+        self.local = (know, total + 1)
+        return self.local
+
+    def increment_known_count(self, reach_request_id: str) -> int:
+        # A broadcast response must NEVER touch the DM global counter.
+        self.global_increments.append(reach_request_id)
+        return 99
+
+
+def _submit_location_on_broadcast(app: Any, client: Any, channel_id: str = "C1") -> None:
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["location_submit"](
+            ack=ack,
+            body={"user": {"id": "U-responder"}},
+            view={
+                "private_metadata": json.dumps({"ping_id": "ping-b1", "channel_id": channel_id}),
+                "state": {
+                    "values": {"location": {"location_input": {"value": "In the library"}}}
+                },
+            },
+            client=client,
+        )
+    )
+
+
+def test_broadcast_first_response_does_not_close_message() -> None:
+    repo = BroadcastRepo()
+    app, client = _register(repository=repo)
+
+    _submit_location_on_broadcast(app, client)
+
+    # Recorded, relayed, acked — but NO chat.update: a first response must
+    # not close a broadcast message.
+    assert repo.recorded == ["helped"]
+    assert len(client.sent) == 1  # requester relay only
+    assert client.message_updates == []
+
+
+def test_broadcast_response_never_touches_dm_global_counter() -> None:
+    repo = BroadcastRepo()
+    app, client = _register(repository=repo)
+
+    _submit_location_on_broadcast(app, client)
+
+    assert repo.global_increments == []  # decoupling
+    assert repo.bumped == [("ping-b1", True)]  # local counters instead
+
+
+def test_broadcast_third_i_know_closes_message() -> None:
+    repo = BroadcastRepo(local=(2, 2))
+    app, client = _register(repository=repo)
+
+    _submit_location_on_broadcast(app, client)
+
+    # This response makes local_know_count 3 → closes with a single update.
+    assert repo.recorded == ["helped"]
+    assert [(u["channel"], u["ts"], u["text"]) for u in client.message_updates] == [
+        ("C1", "1.0001", CUTOFF_STATUS)
+    ]
+
+
+def test_broadcast_fifth_total_response_closes_even_without_three_knows() -> None:
+    # 2 knows + 2 others so far; this "I don't know" makes total 5 while
+    # knows stay at 2 — the total cap closes the message regardless.
+    repo = BroadcastRepo(local=(2, 4))
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-b1"})}],
+                "user": {"id": "U-responder"},
+                "channel_id": "C1",
+            },
+            client=client,
+        )
+    )
+
+    assert repo.recorded == ["unknown"]
+    assert repo.bumped == [("ping-b1", False)]
+    assert [(u["channel"], u["ts"], u["text"]) for u in client.message_updates] == [
+        ("C1", "1.0001", CUTOFF_STATUS)
+    ]
+
+
+def test_broadcast_early_responses_never_close_message() -> None:
+    # 1 know + 2 others so far; another "I don't know" → (1, 3): below both
+    # local thresholds, message must stay open.
+    repo = BroadcastRepo(local=(1, 2))
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-b1"})}],
+                "user": {"id": "U-responder"},
+                "channel_id": "C1",
+            },
+            client=client,
+        )
+    )
+
+    assert repo.recorded == ["unknown"]
+    assert client.message_updates == []
+
+
+def test_broadcast_responses_use_ephemeral_ack_not_visible_edit() -> None:
+    repo = BroadcastRepo(local=(0, 1))
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-b1"})}],
+                "user": {"id": "U-responder"},
+                "channel_id": "C1",
+            },
+            client=client,
+        )
+    )
+
+    # Acknowledgment is ephemeral, addressed to the responder.
+    assert client.ephemerals == [("C1", "U-responder", "Thanks for your response!")]
+    assert client.message_updates == []  # no in-place edit on a shared message
+
+
+def test_broadcast_closed_message_click_gets_ephemeral_note_only() -> None:
+    repo = BroadcastRepo(existing_outcome="helped")
+    app, client = _register(repository=repo)
+
+    async def ack(**kwargs: Any) -> None:
+        pass
+
+    asyncio.run(
+        app.handlers["outcome_unknown"](
+            ack=ack,
+            body={
+                "actions": [{"value": json.dumps({"ping_id": "ping-b1"})}],
+                "user": {"id": "U-responder"},
+                "channel_id": "C1",
+            },
+            client=client,
+        )
+    )
+
+    assert repo.recorded == []  # no duplicate recording
+    assert client.message_updates == []  # never re-update a closed message
+    assert client.ephemerals == [("C1", "U-responder", CUTOFF_STATUS)]

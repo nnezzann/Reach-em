@@ -287,12 +287,19 @@ def render_ping_modal(
     }
 
 
-def render_location_modal(ping_id: str) -> dict[str, Any]:
-    """Follow-up modal for "I know": one single-line location field."""
+def render_location_modal(ping_id: str, channel_id: str = "") -> dict[str, Any]:
+    """Follow-up modal for "I know": one single-line location field.
+
+    ``channel_id`` rides through ``private_metadata`` so modal submissions
+    (which carry no channel context of their own) can still send the
+    per-responder ephemeral acknowledgment on broadcast messages.
+    """
     return {
         "type": "modal",
         "callback_id": "location_submit",
-        "private_metadata": ping_id,
+        "private_metadata": json.dumps(
+            {"ping_id": ping_id, "channel_id": channel_id}, separators=(",", ":")
+        ),
         "title": {"type": "plain_text", "text": "I know"},
         "submit": {"type": "plain_text", "text": "Send"},
         "close": {"type": "plain_text", "text": "Cancel"},
@@ -318,11 +325,13 @@ def render_location_modal(ping_id: str) -> dict[str, Any]:
     }
 
 
-def render_reply_modal(ping_id: str) -> dict[str, Any]:
+def render_reply_modal(ping_id: str, channel_id: str = "") -> dict[str, Any]:
     return {
         "type": "modal",
         "callback_id": "reply_more_submit",
-        "private_metadata": ping_id,
+        "private_metadata": json.dumps(
+            {"ping_id": ping_id, "channel_id": channel_id}, separators=(",", ":")
+        ),
         "title": {"type": "plain_text", "text": "Reply to Reach"},
         "submit": {"type": "plain_text", "text": "Send"},
         "close": {"type": "plain_text", "text": "Cancel"},
