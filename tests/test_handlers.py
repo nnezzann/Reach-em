@@ -5,8 +5,6 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 import reach_bot.handlers
 from reach_bot.handlers import register_handlers
 from reach_bot.persistence import PingOutcome
@@ -283,7 +281,7 @@ def test_submission_rejects_empty_candidates_with_none_scope() -> None:
     ]
 
 
-def test_submission_requires_channel_for_channel_scope() -> None:
+def test_submission_pushes_stage3_for_channel_scope() -> None:
     app, _client = _register()
     acknowledgements: list[dict[str, Any]] = []
 
@@ -312,8 +310,52 @@ def test_submission_requires_channel_for_channel_scope() -> None:
         )
     )
 
+    # Channel scope pushes Stage 3 (multi-channel picker) instead of sending;
+    # channel selection is validated on the Stage 3 submit, never silently
+    # falling back to "none".
+    assert len(acknowledgements) == 1
+    push_ack = acknowledgements[0]
+    assert push_ack["response_action"] == "push"
+    view = push_ack["view"]
+    assert view["callback_id"] == "reach_stage3_submit"
+    assert '"target_id":"U-target"' in view["private_metadata"]
+    assert '"requester_id":"U-requester"' in view["private_metadata"]
+    # The typed message is carried into Stage 3 so the requester keeps it.
+    message_block = next(block for block in view["blocks"] if block["block_id"] == "message")
+    assert message_block["element"]["initial_value"] == "Anyone seen them?"
+
+
+def test_stage3_submit_requires_channels() -> None:
+    app, _client = _register()
+    acknowledgements: list[dict[str, Any]] = []
+
+    async def ack(**kwargs: Any) -> None:
+        acknowledgements.append(kwargs)
+
+    asyncio.run(
+        app.handlers["reach_stage3_submit"](
+            ack=ack,
+            body={"user": {"id": "U-requester"}},
+            view={
+                "private_metadata": json.dumps(
+                    {"requester_id": "U-requester", "target_id": "U-target"}
+                ),
+                "state": {
+                    "values": {
+                        "broadcast_channels": {"channels_choice": {"selected_conversations": []}},
+                        "message": {"message_input": {"value": "Anyone seen them?"}},
+                    }
+                },
+            },
+            client=FakeClient(),
+        )
+    )
+
     assert acknowledgements == [
-        {"response_action": "errors", "errors": {"broadcast_channel": "Pick a channel."}}
+        {
+            "response_action": "errors",
+            "errors": {"broadcast_channels": "Pick at least one public channel."},
+        }
     ]
 
 
@@ -450,14 +492,11 @@ def test_scope_choice_removes_channel_picker_when_scope_is_none() -> None:
     assert [block["block_id"] for block in blocks] == ["candidates", "broadcast_scope", "message"]
 
 
-def test_submission_launches_broadcast_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    from reach_bot import broadcast
-
-    monkeypatch.setattr(broadcast, "SEND_DELAY_SECONDS", 0.0)
-
+def test_stage3_submit_launches_channel_broadcast() -> None:
     class Repo:
         def __init__(self) -> None:
             self.pings: list[str] = []
+            self.contexts: list[Any] = []
 
         def create_reach_request(self, requester_id: str, target_id: str) -> Any:
             return SimpleNamespace(id="request-1", requester_id=requester_id, target_id=target_id)
@@ -472,6 +511,7 @@ def test_submission_launches_broadcast_fan_out(monkeypatch: pytest.MonkeyPatch) 
             presence: str,
         ) -> Any:
             self.pings.append(candidate_id)
+            self.contexts.append(channel_context)
             return SimpleNamespace(id=f"ping-{len(self.pings)}")
 
         def set_ping_delivery(self, ping_id: str, channel: str, message_ts: str) -> None:
@@ -482,13 +522,12 @@ def test_submission_launches_broadcast_fan_out(monkeypatch: pytest.MonkeyPatch) 
 
     repo = Repo()
     app, client = _register(repository=repo)
-    client.channel_members["C1"] = ["U-target", "U-requester", "U-broadcast"]
 
     async def ack(**kwargs: Any) -> None:
         pass
 
     async def scenario() -> None:
-        await app.handlers["reach_submit"](
+        await app.handlers["reach_stage3_submit"](
             ack=ack,
             body={"user": {"id": "U-requester"}},
             view={
@@ -497,12 +536,8 @@ def test_submission_launches_broadcast_fan_out(monkeypatch: pytest.MonkeyPatch) 
                 ),
                 "state": {
                     "values": {
-                        "candidates": {"candidates": {"selected_users": []}},
-                        "broadcast_scope": {
-                            "scope_choice": {"selected_option": {"value": "channel"}}
-                        },
-                        "broadcast_channel": {
-                            "channel_choice": {"selected_conversation": "C1"}
+                        "broadcast_channels": {
+                            "channels_choice": {"selected_conversations": ["C1"]}
                         },
                         "message": {"message_input": {"value": "Anyone seen them?"}},
                     }
@@ -510,16 +545,17 @@ def test_submission_launches_broadcast_fan_out(monkeypatch: pytest.MonkeyPatch) 
             },
             client=client,
         )
-        pending = [
-            task for task in reach_bot.handlers._background_tasks if not task.done()
-        ]
+        pending = [task for task in reach_bot.handlers._background_tasks if not task.done()]
         await asyncio.gather(*pending)
 
     asyncio.run(scenario())
 
-    assert repo.pings == ["U-broadcast"]
-    assert client.sent[0]["channel"] == "U-broadcast"
+    # Broadcast channel posts: one ping per channel, no pre-known candidate.
+    assert repo.pings == [""]
+    assert repo.contexts == ["broadcast"]
+    assert client.sent[0]["channel"] == "C1"
     assert "Reach, relaying for <@U-requester> about <@U-target>" in client.sent[0]["text"]
+    assert client.sent[0]["text"].startswith("<!channel>")
     actions = client.sent[0]["blocks"][1]["elements"]
     assert [element["action_id"] for element in actions] == [
         "outcome_helped",
@@ -794,7 +830,9 @@ def test_reply_more_submit_applies_cleanup() -> None:
 
     assert repo.recorded == ["replied"]
     assert len(client.sent) == 1
-    assert client.sent[0]["text"] == "Reply from Reach recipient:\nThey're at lunch"
+    assert client.sent[0]["text"] == (
+        "Reply about <@U-target> from <@U-candidate>:\nThey're at lunch"
+    )
     assert len(client.message_updates) == 1
     assert client.message_updates[0]["text"] == THANK_YOU_STATUS
 

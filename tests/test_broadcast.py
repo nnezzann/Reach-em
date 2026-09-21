@@ -10,23 +10,15 @@ from reach_bot import broadcast
 class FakeClient:
     def __init__(
         self,
-        channel_members: dict[str, list[str]] | None = None,
-        users: list[dict[str, Any]] | None = None,
+        channels: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.channel_members = channel_members or {}
-        self.users = users or []
+        self.channels = channels or []
         self.sent: list[dict[str, Any]] = []
 
-    async def conversations_members(self, **kwargs: Any) -> dict[str, Any]:
-        members = self.channel_members[str(kwargs["channel"])]
+    async def conversations_list(self, **kwargs: Any) -> dict[str, Any]:
         if not kwargs.get("cursor"):
-            return {"members": members[:2], "response_metadata": {"next_cursor": "next"}}
-        return {"members": members[2:], "response_metadata": {}}
-
-    async def users_list(self, **kwargs: Any) -> dict[str, Any]:
-        if not kwargs.get("cursor"):
-            return {"users": self.users[:2], "response_metadata": {"next_cursor": "next"}}
-        return {"users": self.users[2:], "response_metadata": {}}
+            return {"channels": self.channels[:2], "response_metadata": {"next_cursor": "next"}}
+        return {"channels": self.channels[2:], "response_metadata": {}}
 
     async def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:
         self.sent.append(kwargs)
@@ -60,108 +52,97 @@ class FakeRepo:
         return self.known
 
 
-def test_channel_members_follows_pagination(monkeypatch) -> None:
-    monkeypatch.setattr(broadcast, "SEND_DELAY_SECONDS", 0.0)
-    client = FakeClient(channel_members={"C1": ["U1", "U2", "U3"]})
-
-    assert asyncio.run(broadcast.channel_members(client, "C1")) == ["U1", "U2", "U3"]
-
-
-def test_workspace_members_skip_bots_deleted_and_app_users(monkeypatch) -> None:
-    monkeypatch.setattr(broadcast, "SEND_DELAY_SECONDS", 0.0)
+def test_workspace_public_channels_follows_pagination() -> None:
     client = FakeClient(
-        users=[
-            {"id": "U1"},
-            {"id": "U2", "is_bot": True},
-            {"id": "U3", "deleted": True},
-            {"id": "U4", "is_app_user": True},
-            {"id": "U5"},
+        channels=[
+            {"id": "C1", "is_channel": True, "is_archived": False},
+            {"id": "C2", "is_channel": True, "is_archived": True},
+            {"id": "C3", "is_channel": True, "is_archived": False},
         ]
     )
 
-    assert asyncio.run(broadcast.workspace_members(client)) == ["U1", "U5"]
+    assert asyncio.run(broadcast.workspace_public_channels(client)) == ["C1", "C3"]
 
 
-def test_fan_out_sends_to_channel_except_excluded(monkeypatch) -> None:
-    monkeypatch.setattr(broadcast, "SEND_DELAY_SECONDS", 0.0)
-    client = FakeClient(channel_members={"C1": ["U-target", "U-requester", "U-a", "U-b"]})
+def test_post_to_channels_posts_to_selected_channels() -> None:
+    client = FakeClient()
     repo = FakeRepo()
 
-    sent = asyncio.run(
-        broadcast.fan_out_broadcast(
+    posted = asyncio.run(
+        broadcast.post_to_channels(
             client,
             repo,
             reach_request_id="req-1",
             requester_id="U-requester",
             target_id="U-target",
             scope="channel",
-            channel_id="C1",
+            channel_ids=["C1", "C2"],
             message="Anyone seen them?",
-            exclude={"U-target", "U-requester"},
             known_response_limit=3,
         )
     )
 
-    assert sent == 2
-    assert repo.pings == ["U-a", "U-b"]
-    assert repo.contexts == ["C1", "C1"]
-    assert [message["channel"] for message in client.sent] == ["U-a", "U-b"]
+    assert posted == 2
+    assert sorted(message["channel"] for message in client.sent) == ["C1", "C2"]
     text = client.sent[0]["text"]
     assert "Reach, relaying for <@U-requester> about <@U-target>" in text
+    assert text.startswith("<!channel>")
     actions = client.sent[0]["blocks"][1]["elements"]
     assert [element["action_id"] for element in actions] == [
         "outcome_helped",
         "outcome_unknown",
         "outcome_more",
     ]
-    assert repo.deliveries == ["ping-1", "ping-2"]
+    assert repo.pings == ["", ""]
+    assert repo.contexts == ["broadcast", "broadcast"]
+    assert sorted(repo.deliveries) == ["ping-1", "ping-2"]
 
 
-def test_fan_out_stops_once_response_limit_reached(monkeypatch) -> None:
-    monkeypatch.setattr(broadcast, "SEND_DELAY_SECONDS", 0.0)
-    client = FakeClient(channel_members={"C1": ["U-a", "U-b", "U-c"]})
+def test_post_to_channels_stops_once_response_limit_reached() -> None:
+    client = FakeClient()
     repo = FakeRepo(known=3)
 
-    sent = asyncio.run(
-        broadcast.fan_out_broadcast(
+    posted = asyncio.run(
+        broadcast.post_to_channels(
             client,
             repo,
             reach_request_id="req-1",
             requester_id="U-requester",
             target_id="U-target",
             scope="channel",
-            channel_id="C1",
+            channel_ids=["C1", "C2"],
             message="hi",
-            exclude=set(),
             known_response_limit=3,
         )
     )
 
-    assert sent == 0
+    assert posted == 0
     assert repo.pings == []
     assert client.sent == []
 
 
-def test_fan_out_workspace_scope_uses_user_listing(monkeypatch) -> None:
-    monkeypatch.setattr(broadcast, "SEND_DELAY_SECONDS", 0.0)
-    client = FakeClient(users=[{"id": "U-a"}, {"id": "U-b", "is_bot": True}])
+def test_post_to_channels_workspace_scope_resolves_public_channels() -> None:
+    client = FakeClient(
+        channels=[
+            {"id": "C1", "is_channel": True, "is_archived": False},
+            {"id": "C2", "is_channel": True, "is_archived": False},
+        ]
+    )
     repo = FakeRepo()
 
-    sent = asyncio.run(
-        broadcast.fan_out_broadcast(
+    posted = asyncio.run(
+        broadcast.post_to_channels(
             client,
             repo,
             reach_request_id="req-1",
             requester_id="U-requester",
             target_id="U-target",
             scope="workspace",
-            channel_id="",
+            channel_ids=[],
             message="hi",
-            exclude={"U-requester", "U-target"},
             known_response_limit=3,
         )
     )
 
-    assert sent == 1
-    assert repo.contexts == ["workspace"]
-    assert repo.pings == ["U-a"]
+    assert posted == 2
+    assert sorted(message["channel"] for message in client.sent) == ["C1", "C2"]

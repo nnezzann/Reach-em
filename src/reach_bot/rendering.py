@@ -247,7 +247,9 @@ def render_recipient_actions(
                 "action_id": action_id,
                 "text": {"type": "plain_text", "text": label},
                 "accessibility_label": label,
-                "value": value,
+                # Slack requires button `value` to be a string; handlers decode
+                # it with decode_action_value (JSON with ast fallback).
+                "value": json.dumps(value, separators=(",", ":")),
             }
             for action_id, label in (
                 ("outcome_helped", "\u2705 I know"),
@@ -390,7 +392,10 @@ def render_reach_stage3(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Your message will be posted to each selected public channel with `<!channel>`.",
+                    "text": (
+                        "Your message will be posted to each selected public channel "
+                        "with `<!channel>`."
+                    ),
                 },
             },
         ],

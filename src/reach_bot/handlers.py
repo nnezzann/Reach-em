@@ -11,7 +11,7 @@ from typing import Any
 
 from slack_sdk.errors import SlackApiError
 
-from reach_bot.broadcast import fan_out_broadcast
+from reach_bot.broadcast import post_to_channels
 from reach_bot.persistence import Ping, PingOutcome, ReachRepository
 from reach_bot.rendering import (
     CUTOFF_STATUS,
@@ -147,13 +147,20 @@ def register_handlers(
             .get("selected_conversation", "")
             or ""
         )
+        message = str(values["message"]["message_input"].get("value", "")).strip()
         # When "channel" scope chosen, push Stage 3 instead of sending.
         # The multi-channel picker lives in Stage 3 (render_reach_stage3); the
         # single `broadcast_channel` picker from Stage 2 is replaced by it.
+        # Carry requester/target and the typed message through private_metadata
+        # so the Stage 3 submit handler can compose and send without another
+        # lookup (render_reach_stage3 also restores the message text).
         if scope == "channel":
             await ack(
                 response_action="push",
                 view=render_reach_stage3(
+                    target_id=target_id,
+                    requester_id=requester_id,
+                    message_value=message,
                     initial_channels=[channel_id] if channel_id else None,
                 ),
             )
@@ -166,21 +173,14 @@ def register_handlers(
                 },
             )
             return
-        message = str(values["message"]["message_input"].get("value", "")).strip()
         if not message:
-            await ack(
-                response_action="errors",
-                errors={"message": "Enter a message to send."},
-            )
+            await ack(response_action="errors", errors={"message": "Enter a message to send."})
             return
         # Ack immediately before the slow DB writes and chat_postMessage calls.
         await ack()
         request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
         hand_picked = [user for user in candidates if user not in {target_id, requester_id}]
-        # Broadcast channel posts (channel scope) use the `!channel` mention.
-        # Workspace posts resolve all public workspace channels server-side.
         text_hand_picked = f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
-        text_broadcast = f"<!channel> Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
         for candidate_id in hand_picked:
             # Suggestions are dormant: no computed channel context or
             # presence exists for hand-picked recipients.
@@ -219,14 +219,9 @@ def register_handlers(
                 str(response.get("channel", "")),
                 str(response.get("ts", "")),
             )
-        if scope in {"channel", "workspace"}:
-            from reach_bot.broadcast import post_to_channels
-            # For "channel" scope: the multi-channel picker (Stage 3) has
-            # already resolved the selected channels; pass them in.
-            # For "workspace" scope: resolve all public workspace channels.
-            selected_channels = []
-            if scope == "channel" and channel_id:
-                selected_channels = [channel_id]
+        if scope == "workspace":
+            # Workspace scope resolves all public workspace channels inside
+            # post_to_channels; nothing is selected here.
             task = asyncio.create_task(
                 post_to_channels(
                     client,
@@ -235,7 +230,7 @@ def register_handlers(
                     requester_id=requester_id,
                     target_id=target_id,
                     scope=scope,
-                    channel_ids=selected_channels,
+                    channel_ids=[],
                     message=message,
                     known_response_limit=known_response_limit,
                 )
@@ -400,7 +395,7 @@ def register_handlers(
         responder_id = str(body.get("user", {}).get("id", "unknown"))
         await client.chat_postMessage(
             channel=ping.requester_id,
-            text=f"Reply from Reach recipient (from broadcast):\n{reply}\nResponder: <@{responder_id}>",
+            text=f"Reply about <@{ping.target_id}> from <@{responder_id}>:\n{reply}",
         )
         await _apply_response_cleanup(client, ping)
 
@@ -461,58 +456,58 @@ def register_handlers(
         if count == known_response_limit:
             await _sweep_open_messages(repository, client, ping)
 
+    @slack_app.view("reach_stage3_submit")  # type: ignore[untyped-decorator]
+    async def reach_stage3_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+    ) -> None:
+        """Stage 3 submission: selected channels + message → send broadcast posts."""
+        values = view["state"]["values"]
+        metadata = json.loads(view.get("private_metadata", "{}"))
+        target_id = str(metadata.get("target_id", "")).strip()
+        requester_id = str(metadata.get("requester_id", body.get("user", {}).get("id"))).strip()
+        if not target_id or not requester_id:
+            await ack(
+                response_action="errors", errors={"message": "Session missing. Restart /reach."}
+            )
+            return
 
-@slack_app.view("reach_stage3_submit")  # type: ignore[untyped-decorator]
-async def reach_stage3_submit(
-    ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
-) -> None:
-    """Stage 3 submission: selected channels + message → send broadcast posts."""
-    values = view["state"]["values"]
-    metadata = json.loads(view.get("private_metadata", "{}"))
-    target_id = str(metadata.get("target_id", "")).strip()
-    requester_id = str(metadata.get("requester_id", body.get("user", {}).get("id"))).strip()
-    if not target_id or not requester_id:
-        await ack(response_action="errors", errors={"message": "Session missing. Restart /reach."})
-        return
-
-    selected_conversations = (
-        values.get("broadcast_channels", {})
-        .get("channels_choice", {})
-        .get("selected_conversations", [])
-    )
-    channel_ids = [str(ch) for ch in (selected_conversations or []) if ch]
-    if not channel_ids:
-        await ack(
-            response_action="errors",
-            errors={"broadcast_channels": "Pick at least one public channel."},
+        selected_conversations = (
+            values.get("broadcast_channels", {})
+            .get("channels_choice", {})
+            .get("selected_conversations", [])
         )
-        return
+        channel_ids = [str(ch) for ch in (selected_conversations or []) if ch]
+        if not channel_ids:
+            await ack(
+                response_action="errors",
+                errors={"broadcast_channels": "Pick at least one public channel."},
+            )
+            return
 
-    message = str(values.get("message", {}).get("message_input", {}).get("value", "")).strip()
-    if not message:
-        await ack(response_action="errors", errors={"message": "Enter a message to send."})
-        return
+        message = str(values.get("message", {}).get("message_input", {}).get("value", "")).strip()
+        if not message:
+            await ack(response_action="errors", errors={"message": "Enter a message to send."})
+            return
 
-    await ack()
-    request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
+        await ack()
+        request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
 
-    # Send to selected public channels via bounded concurrent post_to_channels.
-    from reach_bot.broadcast import post_to_channels
-    task = asyncio.create_task(
-        post_to_channels(
-            client,
-            repository,
-            reach_request_id=request.id,
-            requester_id=requester_id,
-            target_id=target_id,
-            scope="channel",
-            channel_ids=channel_ids,
-            message=message,
-            known_response_limit=known_response_limit,
+        # Send to selected public channels via bounded concurrent post_to_channels.
+        task = asyncio.create_task(
+            post_to_channels(
+                client,
+                repository,
+                reach_request_id=request.id,
+                requester_id=requester_id,
+                target_id=target_id,
+                scope="channel",
+                channel_ids=channel_ids,
+                message=message,
+                known_response_limit=known_response_limit,
+            )
         )
-    )
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
 
 async def _replace_with_cutoff_status(client: Any, ping: Ping) -> None:

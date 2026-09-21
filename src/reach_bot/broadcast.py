@@ -36,7 +36,11 @@ async def workspace_public_channels(client: object) -> list[str]:
     channels: list[str] = []
     cursor: str | None = None
     while True:
-        kwargs: dict[str, object] = {"types": "public_channel", "exclude_archived": True, "limit": 200}
+        kwargs: dict[str, object] = {
+            "types": "public_channel",
+            "exclude_archived": True,
+            "limit": 200,
+        }
         if cursor:
             kwargs["cursor"] = cursor
         response = await client.conversations_list(**kwargs)  # type: ignore[attr-defined]
@@ -67,10 +71,9 @@ async def post_to_channels(
     Tracks each post as a broadcast `Ping` so it participates in the
     three-response cutoff sweep and per-message cleanup.
     """
-    if not channel_ids:
-        return 0
-
     # Resolve workspace public channels when scope is "workspace".
+    # This must happen BEFORE the empty-channel_ids guard below, because
+    # workspace broadcasts pass an empty list and resolve channels here.
     if scope == "workspace":
         resolved = await workspace_public_channels(client)
         # Deduplicate and filter out any empty IDs.
@@ -79,6 +82,9 @@ async def post_to_channels(
         if not resolved:
             return 0
         channel_ids = resolved
+
+    if not channel_ids:
+        return 0
 
     text = broadcast_text(message, requester_id, target_id)
     posted = 0
@@ -103,12 +109,11 @@ async def post_to_channels(
                 "broadcast",
                 "unknown",
             )
-            # Store the broadcast context (channel ID) on the ping so the
-            # threshold sweep and per-message cleanup know where to find
-            # the message.
-            ping_with_context = ping  # The ping id is what matters; context added below via delivery.
+            # The channel and message ts are stored on the ping below via
+            # set_ping_delivery, so the threshold sweep and per-message
+            # cleanup know where to find this message.
             try:
-                response = await client.chat_postMessage(
+                response = await client.chat_postMessage(  # type: ignore[attr-defined]
                     channel=channel_id,
                     text=text,
                     blocks=[
@@ -118,7 +123,7 @@ async def post_to_channels(
                             reach_request_id=reach_request_id,
                             requester_id=requester_id,
                             target_id=target_id,
-                            candidate_id=channel_id,  # Channel acts as the "recipient" key for broadcast messages.
+                            candidate_id=channel_id,
                         ),
                     ],
                 )
