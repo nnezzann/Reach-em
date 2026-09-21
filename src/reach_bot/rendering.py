@@ -15,6 +15,20 @@ def mrkdwn_section(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
+def broadcast_text(message: str, requester_id: str, target_id: str) -> str:
+    """Prefix the composed text with the Slack broadcast-mention `<!channel>`.
+
+    `<!channel>` (NOT `<@channel>` — that is a literal user mention and will
+    not notify anyone) is used for public-channel broadcast posts only.
+    """
+    return f"<!channel> Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
+
+
+def dm_text(message: str, requester_id: str, target_id: str) -> str:
+    """The DM framing used for hand-picked recipients (no `<!channel>` prefix)."""
+    return f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
+
+
 def render_reach_stage1() -> dict[str, Any]:
     return {
         "type": "modal",
@@ -209,18 +223,22 @@ def render_recipient_actions(
     reach_request_id: str,
     requester_id: str,
     target_id: str,
-    candidate_id: str,
+    candidate_id: str | None = None,
 ) -> dict[str, Any]:
-    value = json.dumps(
-        {
-            "ping_id": ping_id,
-            "reach_request_id": reach_request_id,
-            "requester_id": requester_id,
-            "target_id": target_id,
-            "candidate_id": candidate_id,
-        },
-        separators=(",", ":"),
-    )
+    """Three reply actions for a recipient message.
+
+    `candidate_id` is required for DMs (one known recipient) but omitted
+    for broadcast channel posts, where the clicker's identity is read
+    from `body["user"]["id"]` at click time (lazy response model).
+    """
+    value: dict[str, str] = {
+        "ping_id": ping_id,
+        "reach_request_id": reach_request_id,
+        "requester_id": requester_id,
+        "target_id": target_id,
+    }
+    if candidate_id:
+        value["candidate_id"] = candidate_id
     return {
         "type": "actions",
         "elements": [
@@ -317,6 +335,64 @@ def render_reply_modal(ping_id: str) -> dict[str, Any]:
                     "multiline": False,
                 },
             }
+        ],
+    }
+
+
+def render_reach_stage3(
+    target_id: str = "",
+    requester_id: str = "",
+    message_value: str = "",
+    initial_channels: list[str] | None = None,
+) -> dict[str, Any]:
+    """Stage 3: multi-channel picker shown when 'channel' scope chosen."""
+    channels_element: dict[str, Any] = {
+        "type": "multi_conversations_select",
+        "action_id": "channels_choice",
+        "placeholder": {"type": "plain_text", "text": "Select channels"},
+        "filter": {"include": ["public"]},
+        "default_to_current_conversation": False,
+    }
+    if initial_channels:
+        channels_element["initial_conversations"] = initial_channels
+
+    return {
+        "type": "modal",
+        "callback_id": "reach_stage3_submit",
+        "private_metadata": json.dumps(
+            {"requester_id": requester_id, "target_id": target_id},
+            separators=(",", ":"),
+        ),
+        "title": {"type": "plain_text", "text": "Select channels"},
+        "submit": {"type": "plain_text", "text": "Send"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "broadcast_channels",
+                "label": {"type": "plain_text", "text": "Channels to post in"},
+                "element": channels_element,
+                "optional": False,
+            },
+            {
+                "type": "input",
+                "block_id": "message",
+                "label": {"type": "plain_text", "text": "Message"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "message_input",
+                    "initial_value": message_value,
+                    "placeholder": {"type": "plain_text", "text": "Type a short message"},
+                    "multiline": False,
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "Your message will be posted to each selected public channel with `<!channel>`.",
+                },
+            },
         ],
     }
 

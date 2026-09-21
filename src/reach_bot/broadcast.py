@@ -1,8 +1,16 @@
-"""Background fan-out for the channel/workspace broadcast scopes.
+"""Broadcast scope delivery for Reach.
 
-Recipients reached through a broadcast get exactly the same DM, ping
-record, and three response actions as hand-picked ones — the response
-cutoff counts them together, per reach request.
+Replaced the old per-recipient DM fan-out with public-channel posts:
+- "channel" scope: posts to one or more selected public channels.
+- "workspace" scope: resolves all public workspace channels and posts
+  one message per channel.
+- Hand-picked recipients remain unchanged (individual DMs via the
+  existing fast synchronous path in handlers.py).
+
+Each channel post uses `<!channel>` mention syntax (not `<@channel>`,
+which is a literal user mention and will not notify anyone), carries the
+same three-button `actions` block, and is tracked as a broadcast ping so
+it participates in the threshold sweep and cleanup rules.
 """
 
 from __future__ import annotations
@@ -13,48 +21,35 @@ import logging
 from slack_sdk.errors import SlackApiError
 
 from reach_bot.persistence import ReachRepository
-from reach_bot.rendering import mrkdwn_section, render_recipient_actions
+from reach_bot.rendering import broadcast_text, mrkdwn_section, render_recipient_actions
 
 log = logging.getLogger(__name__)
 
-# Polite pacing for bulk DMs; Slack rate-limits chat.postMessage heavily.
-SEND_DELAY_SECONDS = 1.0
+# Bounded concurrency for broadcast posts to public channels.
+# Keeps the fan-out well under Slack's per-workspace rate limits without
+# making large workspace broadcasts impossibly slow.
+MAX_CONCURRENT_CHANNEL_POSTS = 5
 
 
-async def channel_members(client: object, channel_id: str) -> list[str]:
-    """All member IDs of a channel, following cursor pagination."""
-    member_ids: list[str] = []
+async def workspace_public_channels(client: object) -> list[str]:
+    """Resolve all public (non-archived) workspace channels via paginated `conversations.list`."""
+    channels: list[str] = []
     cursor: str | None = None
     while True:
-        kwargs: dict[str, object] = {"channel": channel_id, "limit": 200}
+        kwargs: dict[str, object] = {"types": "public_channel", "exclude_archived": True, "limit": 200}
         if cursor:
             kwargs["cursor"] = cursor
-        response = await client.conversations_members(**kwargs)  # type: ignore[attr-defined]
-        member_ids.extend(str(member) for member in response.get("members", []))
+        response = await client.conversations_list(**kwargs)  # type: ignore[attr-defined]
+        for ch in response.get("channels", []):
+            if ch.get("is_channel") and not ch.get("is_archived"):
+                channels.append(str(ch.get("id", "")))
         cursor = response.get("response_metadata", {}).get("next_cursor") or None
         if not cursor:
-            return member_ids
+            break
+    return channels
 
 
-async def workspace_members(client: object) -> list[str]:
-    """Active human workspace member IDs, following cursor pagination."""
-    member_ids: list[str] = []
-    cursor: str | None = None
-    while True:
-        kwargs: dict[str, object] = {"limit": 200}
-        if cursor:
-            kwargs["cursor"] = cursor
-        response = await client.users_list(**kwargs)  # type: ignore[attr-defined]
-        for member in response.get("users", []):
-            if member.get("deleted") or member.get("is_bot") or member.get("is_app_user"):
-                continue
-            member_ids.append(str(member["id"]))
-        cursor = response.get("response_metadata", {}).get("next_cursor") or None
-        if not cursor:
-            return member_ids
-
-
-async def fan_out_broadcast(
+async def post_to_channels(
     client: object,
     repository: ReachRepository,
     *,
@@ -62,71 +57,90 @@ async def fan_out_broadcast(
     requester_id: str,
     target_id: str,
     scope: str,
-    channel_id: str,
+    channel_ids: list[str],
     message: str,
-    exclude: set[str],
     known_response_limit: int,
 ) -> int:
-    """DM the broadcast audience; returns the number of messages sent.
+    """Post the composed message to each selected/resolved public channel.
 
-    Stops early once the per-request "I know" cutoff is reached so a
-    confirmed target stops generating new interruptions.
+    Returns the number of channels successfully posted to.
+    Tracks each post as a broadcast `Ping` so it participates in the
+    three-response cutoff sweep and per-message cleanup.
     """
-    if scope == "channel":
-        context = channel_id
-        recipient_ids = await channel_members(client, channel_id)
-    elif scope == "workspace":
-        context = "workspace"
-        recipient_ids = await workspace_members(client)
-    else:
+    if not channel_ids:
         return 0
 
-    # Mentions are built server-side from stored IDs, identical to the
-    # hand-picked send path.
-    text = f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
-    sent = 0
-    for user_id in dict.fromkeys(recipient_ids):
-        if user_id in exclude:
-            continue
-        if repository.known_count(reach_request_id) >= known_response_limit:
-            log.info(
-                "broadcast fan-out stopped early: response limit reached for request %s",
+    # Resolve workspace public channels when scope is "workspace".
+    if scope == "workspace":
+        resolved = await workspace_public_channels(client)
+        # Deduplicate and filter out any empty IDs.
+        resolved = [str(ch) for ch in dict.fromkeys(resolved) if ch]
+        # If no public channels found, nothing to post.
+        if not resolved:
+            return 0
+        channel_ids = resolved
+
+    text = broadcast_text(message, requester_id, target_id)
+    posted = 0
+    # Use a bounded semaphore to avoid overwhelming Slack rate limits.
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHANNEL_POSTS)
+    tasks: list[asyncio.Task[int]] = []
+
+    async def post_single(channel_id: str) -> int:
+        async with semaphore:
+            # Check the threshold before posting; if the limit has already
+            # been reached, skip further posts.
+            if repository.known_count(reach_request_id) >= known_response_limit:
+                return 0
+            # Create a broadcast ping — no pre-known recipient, identity
+            # will be read lazily from the clicker's user at response time.
+            ping = await asyncio.to_thread(
+                repository.create_ping,
                 reach_request_id,
+                requester_id,
+                target_id,
+                "",  # No single candidate — broadcast to a channel
+                "broadcast",
+                "unknown",
             )
-            break
-        ping = await asyncio.to_thread(
-            repository.create_ping,
-            reach_request_id,
-            requester_id,
-            target_id,
-            user_id,
-            context,
-            "unknown",
-        )
-        try:
-            response = await client.chat_postMessage(  # type: ignore[attr-defined]
-                channel=user_id,
-                text=text,
-                blocks=[
-                    mrkdwn_section(text),
-                    render_recipient_actions(
-                        ping_id=ping.id,
-                        reach_request_id=reach_request_id,
-                        requester_id=requester_id,
-                        target_id=target_id,
-                        candidate_id=user_id,
-                    ),
-                ],
+            # Store the broadcast context (channel ID) on the ping so the
+            # threshold sweep and per-message cleanup know where to find
+            # the message.
+            ping_with_context = ping  # The ping id is what matters; context added below via delivery.
+            try:
+                response = await client.chat_postMessage(
+                    channel=channel_id,
+                    text=text,
+                    blocks=[
+                        mrkdwn_section(text),
+                        render_recipient_actions(
+                            ping_id=ping.id,
+                            reach_request_id=reach_request_id,
+                            requester_id=requester_id,
+                            target_id=target_id,
+                            candidate_id=channel_id,  # Channel acts as the "recipient" key for broadcast messages.
+                        ),
+                    ],
+                )
+            except SlackApiError as exc:
+                log.warning("Broadcast post to %s failed: %s", channel_id, exc)
+                return 0
+            await asyncio.to_thread(
+                repository.set_ping_delivery,
+                ping.id,
+                str(channel_id),  # channel = the public channel ID (used for chat.update sweep)
+                str(response.get("ts", "")),
             )
-        except SlackApiError as exc:
-            log.warning("broadcast DM to %s failed: %s", user_id, exc)
-            continue
-        await asyncio.to_thread(
-            repository.set_ping_delivery,
-            ping.id,
-            str(response.get("channel", "")),
-            str(response.get("ts", "")),
-        )
-        sent += 1
-        await asyncio.sleep(SEND_DELAY_SECONDS)
-    return sent
+            return 1
+
+    for ch in channel_ids:
+        task = asyncio.create_task(post_single(ch))
+        tasks.append(task)
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, int) and result > 0:
+            posted += result
+        elif isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+            log.error("Broadcast post exception: %s", result)
+    return posted

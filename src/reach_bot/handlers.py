@@ -21,6 +21,7 @@ from reach_bot.rendering import (
     render_ping_modal,
     render_reach_stage1,
     render_reach_stage2,
+    render_reach_stage3,
     render_recipient_actions,
     render_reply_modal,
 )
@@ -146,10 +147,15 @@ def register_handlers(
             .get("selected_conversation", "")
             or ""
         )
-        if scope == "channel" and not channel_id:
+        # When "channel" scope chosen, push Stage 3 instead of sending.
+        # The multi-channel picker lives in Stage 3 (render_reach_stage3); the
+        # single `broadcast_channel` picker from Stage 2 is replaced by it.
+        if scope == "channel":
             await ack(
-                response_action="errors",
-                errors={"broadcast_channel": "Pick a channel."},
+                response_action="push",
+                view=render_reach_stage3(
+                    initial_channels=[channel_id] if channel_id else None,
+                ),
             )
             return
         if not candidates and scope == "none":
@@ -171,6 +177,10 @@ def register_handlers(
         await ack()
         request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
         hand_picked = [user for user in candidates if user not in {target_id, requester_id}]
+        # Broadcast channel posts (channel scope) use the `!channel` mention.
+        # Workspace posts resolve all public workspace channels server-side.
+        text_hand_picked = f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
+        text_broadcast = f"<!channel> Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
         for candidate_id in hand_picked:
             # Suggestions are dormant: no computed channel context or
             # presence exists for hand-picked recipients.
@@ -186,7 +196,7 @@ def register_handlers(
             # Mentions are built server-side from stored IDs; the requester's
             # composed message rides along as free text (modal input is
             # literal text Slack never resolves into mentions).
-            text = f"Reach, relaying for <@{requester_id}> about <@{target_id}>:\n{message}"
+            text = text_hand_picked
             response = await client.chat_postMessage(
                 channel=candidate_id,
                 text=text,
@@ -210,17 +220,23 @@ def register_handlers(
                 str(response.get("ts", "")),
             )
         if scope in {"channel", "workspace"}:
+            from reach_bot.broadcast import post_to_channels
+            # For "channel" scope: the multi-channel picker (Stage 3) has
+            # already resolved the selected channels; pass them in.
+            # For "workspace" scope: resolve all public workspace channels.
+            selected_channels = []
+            if scope == "channel" and channel_id:
+                selected_channels = [channel_id]
             task = asyncio.create_task(
-                fan_out_broadcast(
+                post_to_channels(
                     client,
                     repository,
                     reach_request_id=request.id,
                     requester_id=requester_id,
                     target_id=target_id,
                     scope=scope,
-                    channel_id=channel_id,
+                    channel_ids=selected_channels,
                     message=message,
-                    exclude=set(hand_picked) | {target_id, requester_id},
                     known_response_limit=known_response_limit,
                 )
             )
@@ -379,9 +395,12 @@ def register_handlers(
                 log.error("ephemeral note failed for ping=%s: %s", ping_id, exc)
             return
         repository.record_outcome(PingOutcome(ping_id, "replied"))
+        # Relay response to requester; for broadcasts, the responder's identity
+        # is the clicker's user (lazy, not a pre-known candidate).
+        responder_id = str(body.get("user", {}).get("id", "unknown"))
         await client.chat_postMessage(
             channel=ping.requester_id,
-            text=f"Reply from Reach recipient:\n{reply}",
+            text=f"Reply from Reach recipient (from broadcast):\n{reply}\nResponder: <@{responder_id}>",
         )
         await _apply_response_cleanup(client, ping)
 
@@ -418,16 +437,82 @@ def register_handlers(
             )
         )
         if location:
-            await client.chat_postMessage(
-                channel=ping.requester_id,
-                text=(
-                    f"<@{ping.candidate_id}> knows how to reach "
-                    f"<@{ping.target_id}>, (She)He says:\n {location}"
-                ),
-            )
+            # For hand-picked DMs, the candidate is known (ping.candidate_id).
+            # For broadcast channel posts, the responder's identity comes from
+            # the click (lazy), so we relay using the clicker's user ID.
+            responder_id = body["user"]["id"]
+            if ping and ping.candidate_id:
+                await client.chat_postMessage(
+                    channel=ping.requester_id,
+                    text=(
+                        f"<@{ping.candidate_id}> knows how to reach "
+                        f"<@{ping.target_id}>: {location}"
+                    ),
+                )
+            else:
+                await client.chat_postMessage(
+                    channel=ping.requester_id,
+                    text=(
+                        f"<@{responder_id}> (in the broadcast) knows how to reach "
+                        f"<@{ping.target_id}>: {location}"
+                    ),
+                )
         await _apply_response_cleanup(client, ping)
         if count == known_response_limit:
             await _sweep_open_messages(repository, client, ping)
+
+
+@slack_app.view("reach_stage3_submit")  # type: ignore[untyped-decorator]
+async def reach_stage3_submit(
+    ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+) -> None:
+    """Stage 3 submission: selected channels + message → send broadcast posts."""
+    values = view["state"]["values"]
+    metadata = json.loads(view.get("private_metadata", "{}"))
+    target_id = str(metadata.get("target_id", "")).strip()
+    requester_id = str(metadata.get("requester_id", body.get("user", {}).get("id"))).strip()
+    if not target_id or not requester_id:
+        await ack(response_action="errors", errors={"message": "Session missing. Restart /reach."})
+        return
+
+    selected_conversations = (
+        values.get("broadcast_channels", {})
+        .get("channels_choice", {})
+        .get("selected_conversations", [])
+    )
+    channel_ids = [str(ch) for ch in (selected_conversations or []) if ch]
+    if not channel_ids:
+        await ack(
+            response_action="errors",
+            errors={"broadcast_channels": "Pick at least one public channel."},
+        )
+        return
+
+    message = str(values.get("message", {}).get("message_input", {}).get("value", "")).strip()
+    if not message:
+        await ack(response_action="errors", errors={"message": "Enter a message to send."})
+        return
+
+    await ack()
+    request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
+
+    # Send to selected public channels via bounded concurrent post_to_channels.
+    from reach_bot.broadcast import post_to_channels
+    task = asyncio.create_task(
+        post_to_channels(
+            client,
+            repository,
+            reach_request_id=request.id,
+            requester_id=requester_id,
+            target_id=target_id,
+            scope="channel",
+            channel_ids=channel_ids,
+            message=message,
+            known_response_limit=known_response_limit,
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def _replace_with_cutoff_status(client: Any, ping: Ping) -> None:
@@ -441,8 +526,16 @@ async def _replace_with_cutoff_status(client: Any, ping: Ping) -> None:
 
 
 async def _apply_response_cleanup(client: Any, ping: Ping) -> None:
-    """Remove the actions block from a recipient's message and show a thank-you line."""
-    if not ping.message_ts:
+    """Remove actions block from recipient's message and show thank-you line.
+
+    For DMs: uses the recipient's DM channel (ping.channel = DM channel).
+    For broadcast posts: uses the public channel (ping.channel = public
+    channel ID) since the message is shared there.
+    """
+    # For broadcasts, ping.candidate_id is empty; the message lives in
+    # ping.channel (the public channel). For DMs, ping.channel is the DM
+    # channel ID. Either way, ping.channel holds the correct location.
+    if not ping.message_ts or not ping.channel:
         return
     try:
         await client.chat_update(channel=ping.channel, ts=ping.message_ts, text=THANK_YOU_STATUS)
