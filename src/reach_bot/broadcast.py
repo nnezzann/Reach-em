@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 
 from slack_sdk.errors import SlackApiError
 
@@ -64,6 +65,7 @@ async def post_to_channels(
     channel_ids: list[str],
     message: str,
     known_response_limit: int,
+    expires_at: datetime | None = None,
 ) -> int:
     """Post the composed message to each selected/resolved public channel.
 
@@ -136,6 +138,10 @@ async def post_to_channels(
                 str(channel_id),  # channel = the public channel ID (used for chat.update sweep)
                 str(response.get("ts", "")),
             )
+            if expires_at is not None:
+                setter = getattr(repository, "set_ping_expiry", None)
+                if setter is not None:
+                    await asyncio.to_thread(setter, ping.id, expires_at)
             return 1
 
     for ch in channel_ids:

@@ -42,6 +42,8 @@ class Ping:
     local_know_count: int = 0
     local_total_count: int = 0
     broadcast_closed: bool = False
+    expires_at: datetime | None = None
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,11 @@ class ReachRepository(Protocol):
     def set_ping_delivery(self, ping_id: str, channel: str, message_ts: str) -> None:
         """Store where a sent recipient message lives so it can be edited later."""
         ...
+
+    def set_ping_expiry(self, ping_id: str, expires_at: datetime) -> None: ...
+    def get_expired_pings(self, now: datetime) -> list[Ping]: ...
+    def mark_ping_deleted(self, ping_id: str, deleted_at: datetime) -> None: ...
+    def get_pings_before(self, cutoff: datetime) -> list[Ping]: ...
 
     def increment_known_count(self, reach_request_id: str) -> int:
         """Atomically count one more "I know" response and return the new count.
@@ -179,6 +186,35 @@ class MemoryRepository:
             for ping in self.pings
         ]
 
+    def set_ping_expiry(self, ping_id: str, expires_at: datetime) -> None:
+        self.pings = [
+            replace(ping, expires_at=expires_at) if ping.id == ping_id else ping
+            for ping in self.pings
+        ]
+
+    def get_expired_pings(self, now: datetime) -> list[Ping]:
+        return [
+            ping for ping in self.pings
+            if (
+                ping.message_ts
+                and ping.expires_at
+                and ping.expires_at <= now
+                and not ping.deleted_at
+            )
+        ]
+
+    def mark_ping_deleted(self, ping_id: str, deleted_at: datetime) -> None:
+        self.pings = [
+            replace(ping, deleted_at=deleted_at) if ping.id == ping_id else ping
+            for ping in self.pings
+        ]
+
+    def get_pings_before(self, cutoff: datetime) -> list[Ping]:
+        return [
+            ping for ping in self.pings
+            if ping.message_ts and ping.created_at < cutoff and not ping.deleted_at
+        ]
+
     def increment_known_count(self, reach_request_id: str) -> int:
         with self._count_lock:
             count = self._known_counts.get(reach_request_id, 0) + 1
@@ -227,6 +263,7 @@ class MemoryRepository:
             and ping.message_ts
             and ping.candidate_id != ""
             and ping.id not in self.outcomes
+            and not ping.deleted_at
         ]
 
     def affinities(self, target_id: str) -> dict[str, Affinity]:
@@ -358,7 +395,8 @@ class PostgresRepository:
                 """
                 SELECT id, requester_id, target_id, candidate_id, channel_context,
                        presence_at_ping, created_at, reach_request_id, channel, message_ts,
-                       local_know_count, local_total_count, broadcast_closed
+                       local_know_count, local_total_count, broadcast_closed,
+                       expires_at, deleted_at
                 FROM pings WHERE id = %s
                 """,
                 (ping_id,),
@@ -391,6 +429,47 @@ class PostgresRepository:
                 (channel, message_ts, ping_id),
             )
         self.connection.commit()
+
+    def set_ping_expiry(self, ping_id: str, expires_at: datetime) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("UPDATE pings SET expires_at = %s WHERE id = %s", (expires_at, ping_id))
+        self.connection.commit()
+
+    def get_expired_pings(self, now: datetime) -> list[Ping]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, requester_id, target_id, candidate_id, channel_context,
+                       presence_at_ping, created_at, reach_request_id, channel, message_ts,
+                       local_know_count, local_total_count, broadcast_closed,
+                       expires_at, deleted_at
+                FROM pings
+                WHERE message_ts <> '' AND expires_at IS NOT NULL
+                  AND expires_at <= %s AND deleted_at IS NULL
+                """,
+                (now,),
+            )
+            return [Ping(*row) for row in cursor.fetchall()]
+
+    def mark_ping_deleted(self, ping_id: str, deleted_at: datetime) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("UPDATE pings SET deleted_at = %s WHERE id = %s", (deleted_at, ping_id))
+        self.connection.commit()
+
+    def get_pings_before(self, cutoff: datetime) -> list[Ping]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, requester_id, target_id, candidate_id, channel_context,
+                       presence_at_ping, created_at, reach_request_id, channel, message_ts,
+                       local_know_count, local_total_count, broadcast_closed,
+                       expires_at, deleted_at
+                FROM pings
+                WHERE message_ts <> '' AND created_at < %s AND deleted_at IS NULL
+                """,
+                (cutoff,),
+            )
+            return [Ping(*row) for row in cursor.fetchall()]
 
     def increment_known_count(self, reach_request_id: str) -> int:
         """Single-statement increment-and-check; safe against races."""
@@ -491,11 +570,13 @@ class PostgresRepository:
                 """
                 SELECT id, requester_id, target_id, candidate_id, channel_context,
                        presence_at_ping, created_at, reach_request_id, channel, message_ts,
-                       local_know_count, local_total_count, broadcast_closed
+                       local_know_count, local_total_count, broadcast_closed,
+                       expires_at, deleted_at
                 FROM pings
                 WHERE reach_request_id = %s
                   AND message_ts <> ''
                   AND candidate_id <> ''
+                  AND deleted_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM ping_outcomes WHERE ping_id = pings.id
                   )

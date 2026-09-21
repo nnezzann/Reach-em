@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from slack_sdk.errors import SlackApiError
@@ -40,9 +40,45 @@ BROADCAST_TOTAL_LIMIT = 5
 # Ephemeral note shown to anyone clicking a broadcast message that has
 # already been closed by its local thresholds: no recording, no re-update.
 BROADCAST_CLOSED_NOTE = CUTOFF_STATUS
+# The explicit cleanup command only targets tracked messages created before
+# retention was introduced. It never sweeps arbitrary user messages.
+RETENTION_FEATURE_INTRODUCED_AT = datetime(2026, 9, 21, tzinfo=UTC)
 
 # Background fan-out tasks; kept referenced so they are not garbage-collected.
 _background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _retention_expiry(values: dict[str, Any]) -> tuple[datetime | None, str | None]:
+    raw_amount = str(
+        values.get("retention_amount", {})
+        .get("retention_amount_input", {})
+        .get("value", "")
+        or ""
+    ).strip()
+    if not raw_amount:
+        return None, None
+    if not raw_amount.isdigit() or int(raw_amount) <= 0:
+        return None, "Enter a positive whole number for the retention time."
+    unit = str(
+        values.get("retention_unit", {})
+        .get("retention_unit_choice", {})
+        .get("selected_option", {})
+        .get("value", "hours")
+    )
+    factors = {"minutes": 60, "hours": 3600, "days": 86400}
+    if unit not in factors:
+        return None, "Choose minutes, hours, or days for the retention unit."
+    return datetime.now(UTC) + timedelta(seconds=int(raw_amount) * factors[unit]), None
+
+
+async def _set_ping_expiry(
+    repository: ReachRepository, ping_id: str, expires_at: datetime | None
+) -> None:
+    if expires_at is None:
+        return
+    setter = getattr(repository, "set_ping_expiry", None)
+    if setter is not None:
+        await asyncio.to_thread(setter, ping_id, expires_at)
 
 
 def decode_action_value(value: str) -> dict[str, str]:
@@ -104,6 +140,53 @@ async def _post_ephemeral(client: Any, channel: str, user_id: str, text: str) ->
         log.error("chat_postEphemeral failed for channel=%s user=%s: %s", channel, user_id, exc)
 
 
+async def _delete_message(client: Any, ping: Ping) -> bool:
+    if not ping.channel or not ping.message_ts:
+        return False
+    try:
+        delete = getattr(client, "chat_delete", None)
+        if delete is None:
+            # Compatibility for lightweight clients used by older integrations;
+            # the real Slack client always has chat.delete.
+            await client.chat_update(channel=ping.channel, ts=ping.message_ts, text=CUTOFF_STATUS)
+        else:
+            await delete(channel=ping.channel, ts=ping.message_ts)
+        return True
+    except SlackApiError as exc:
+        if exc.response.get("error") in {"message_not_found", "channel_not_found"}:
+            return True
+        log.error("message deletion failed for ping=%s: %s", ping.id, exc)
+        return False
+
+
+async def delete_expired_messages(repository: ReachRepository, client: Any) -> int:
+    """Delete all tracked messages whose configured retention has elapsed."""
+    getter = getattr(repository, "get_expired_pings", None)
+    marker = getattr(repository, "mark_ping_deleted", None)
+    if getter is None or marker is None:
+        return 0
+    deleted = 0
+    for ping in await asyncio.to_thread(getter, datetime.now(UTC)):
+        if await _delete_message(client, ping):
+            await asyncio.to_thread(marker, ping.id, datetime.now(UTC))
+            deleted += 1
+    return deleted
+
+
+async def delete_legacy_messages(repository: ReachRepository, client: Any) -> int:
+    """One-time cleanup for messages sent before retention was introduced."""
+    getter = getattr(repository, "get_pings_before", None)
+    marker = getattr(repository, "mark_ping_deleted", None)
+    if getter is None or marker is None:
+        return 0
+    deleted = 0
+    for ping in await asyncio.to_thread(getter, RETENTION_FEATURE_INTRODUCED_AT):
+        if await _delete_message(client, ping):
+            await asyncio.to_thread(marker, ping.id, datetime.now(UTC))
+            deleted += 1
+    return deleted
+
+
 async def _finish_broadcast_response(
     repository: ReachRepository,
     client: Any,
@@ -117,14 +200,21 @@ async def _finish_broadcast_response(
         ping.id, counts_toward_known
     )
     await _post_ephemeral(
-        client, channel or ping.channel, responder_id, "Thanks for your response!"
+        client,
+        channel or ping.channel,
+        responder_id,
+        CUTOFF_STATUS if closed_now else "Thanks for your response!",
     )
     if not closed_now or not ping.message_ts:
         return
-    try:
-        await client.chat_update(channel=ping.channel, ts=ping.message_ts, text=CUTOFF_STATUS)
-    except SlackApiError as exc:
-        log.error("broadcast closure update failed for ping=%s: %s", ping.id, exc)
+    # Broadcast posts are shared by an entire channel. Once the local
+    # threshold is reached, remove the bot's post instead of leaving a
+    # visible "Someone already..." status message in the channel. The
+    # triggering responder still gets the status ephemerally above.
+    if await _delete_message(client, ping):
+        marker = getattr(repository, "mark_ping_deleted", None)
+        if marker is not None:
+            marker(ping.id, datetime.now(UTC))
     try:
         await client.chat_postMessage(
             channel=ping.requester_id,
@@ -164,6 +254,28 @@ def register_handlers(
         except Exception as exc:
             log.exception("/reach unhandled error for user=%s", command.get("user_id"))
             await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
+
+    @slack_app.command("/reach-cleanup")  # type: ignore[untyped-decorator]
+    async def reach_cleanup_command(
+        ack: Callable[..., Awaitable[None]],
+        command: dict[str, Any],
+        respond: Callable[..., Awaitable[None]],
+        client: Any,
+    ) -> None:
+        """Delete tracked pre-retention messages after an explicit confirmation."""
+        await ack()
+        if str(command.get("text", "")).strip().lower() != "confirm":
+            await respond(
+                response_type="ephemeral",
+                text="This removes all tracked pre-retention Reach messages. "
+                "Run `/reach-cleanup confirm` to proceed.",
+            )
+            return
+        deleted = await delete_legacy_messages(repository, client)
+        await respond(
+            response_type="ephemeral",
+            text=f"Removed {deleted} older Reach message(s) tracked by the bot.",
+        )
 
     @slack_app.view("reach_stage1_submit")  # type: ignore[untyped-decorator]
     async def reach_stage1_submit(
@@ -237,6 +349,10 @@ def register_handlers(
             or ""
         )
         message = str(values["message"]["message_input"].get("value", "")).strip()
+        expires_at, retention_error = _retention_expiry(values)
+        if retention_error:
+            await ack(response_action="errors", errors={"retention_amount": retention_error})
+            return
         # When "channel" scope chosen, push Stage 3 instead of sending.
         # The multi-channel picker lives in Stage 3 (render_reach_stage3); the
         # single `broadcast_channel` picker from Stage 2 is replaced by it.
@@ -251,6 +367,18 @@ def register_handlers(
                     requester_id=requester_id,
                     message_value=message,
                     initial_channels=[channel_id] if channel_id else None,
+                    retention_amount=str(
+                        values.get("retention_amount", {})
+                        .get("retention_amount_input", {})
+                        .get("value", "")
+                        or ""
+                    ),
+                    retention_unit=str(
+                        values.get("retention_unit", {})
+                        .get("retention_unit_choice", {})
+                        .get("selected_option", {})
+                        .get("value", "hours")
+                    ),
                 ),
             )
             return
@@ -311,6 +439,7 @@ def register_handlers(
                 str(response.get("channel", "")),
                 str(response.get("ts", "")),
             )
+            await _set_ping_expiry(repository, ping.id, expires_at)
         if scope == "workspace":
             # Workspace scope resolves all public workspace channels inside
             # post_to_channels; nothing is selected here.
@@ -325,6 +454,7 @@ def register_handlers(
                     channel_ids=[],
                     message=message,
                     known_response_limit=known_response_limit,
+                    expires_at=expires_at,
                 )
             )
             _background_tasks.add(task)
@@ -356,6 +486,17 @@ def register_handlers(
             or ""
         )
         message_value = state.get("message", {}).get("message_input", {}).get("value")
+        retention_amount = (
+            state.get("retention_amount", {})
+            .get("retention_amount_input", {})
+            .get("value")
+        )
+        retention_unit = (
+            state.get("retention_unit", {})
+            .get("retention_unit_choice", {})
+            .get("selected_option", {})
+            .get("value", "hours")
+        )
         await client.views_update(
             view_id=view["id"],
             view=render_reach_stage2(
@@ -366,6 +507,8 @@ def register_handlers(
                 initial_candidates=selected_users,
                 initial_channel=selected_channel if scope == "channel" else None,
                 message_value=message_value,
+                retention_amount=retention_amount,
+                retention_unit=str(retention_unit),
             ),
         )
 
@@ -652,6 +795,10 @@ def register_handlers(
         if not message:
             await ack(response_action="errors", errors={"message": "Enter a message to send."})
             return
+        expires_at, retention_error = _retention_expiry(values)
+        if retention_error:
+            await ack(response_action="errors", errors={"retention_amount": retention_error})
+            return
 
         await ack()
         request = await asyncio.to_thread(repository.create_reach_request, requester_id, target_id)
@@ -668,6 +815,7 @@ def register_handlers(
                 channel_ids=channel_ids,
                 message=message,
                 known_response_limit=known_response_limit,
+                expires_at=expires_at,
             )
         )
         _background_tasks.add(task)

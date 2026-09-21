@@ -145,6 +145,8 @@ def test_target_selection_renders_stage_two_inside_the_ack() -> None:
         "candidates",
         "broadcast_scope",
         "message",
+        "retention_amount",
+        "retention_unit",
     ]
     message = next(block for block in view["blocks"] if block["block_id"] == "message")
     assert message["element"]["initial_value"].startswith("Have you seen Grace?")
@@ -404,6 +406,8 @@ def test_scope_choice_adds_channel_picker_and_preserves_input() -> None:
         "broadcast_scope",
         "broadcast_channel",
         "message",
+        "retention_amount",
+        "retention_unit",
     ]
     assert blocks[0]["element"]["initial_users"] == ["U-friend"]
     assert blocks[1]["element"]["initial_option"]["value"] == "channel"
@@ -493,7 +497,13 @@ def test_scope_choice_removes_channel_picker_when_scope_is_none() -> None:
     )
 
     blocks = client.updated[0]["view"]["blocks"]
-    assert [block["block_id"] for block in blocks] == ["candidates", "broadcast_scope", "message"]
+    assert [block["block_id"] for block in blocks] == [
+        "candidates",
+        "broadcast_scope",
+        "message",
+        "retention_amount",
+        "retention_unit",
+    ]
 
 
 def test_stage3_submit_launches_channel_broadcast() -> None:

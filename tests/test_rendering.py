@@ -47,6 +47,8 @@ def test_reach_stage2_is_the_picker_modal():
         "candidates",
         "broadcast_scope",
         "message",
+        "retention_amount",
+        "retention_unit",
     ]
     candidates = view["blocks"][0]
     assert candidates["element"]["type"] == "multi_users_select"
@@ -62,6 +64,8 @@ def test_reach_stage2_is_the_picker_modal():
     assert scope["element"]["initial_option"]["value"] == "none"
     message = view["blocks"][2]
     assert message["element"]["initial_value"].startswith("Have you seen Grace?")
+    assert view["blocks"][3]["element"]["action_id"] == "retention_amount_input"
+    assert view["blocks"][4]["element"]["initial_option"]["value"] == "hours"
 
 
 def test_reach_stage2_channel_picker_only_when_scope_is_channel():

@@ -20,6 +20,12 @@
         "description": "Find the right people to reach when a teammate is unavailable.",
         "usage_hint": "@username [optional note]",
         "should_escape": false
+      },
+      {
+        "command": "/reach-cleanup",
+        "description": "Remove Reach messages sent before retention was introduced.",
+        "usage_hint": "confirm",
+        "should_escape": false
       }
     ]
   },

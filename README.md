@@ -8,6 +8,8 @@ Reach'em is a Slack bot that helps a requester reach the smallest useful audienc
 - **Broadcast scopes**: Option to reach everyone in a channel or the entire workspace  
 - **Per-responder acknowledgment**: DM respondents see an in-place thank-you edit; broadcast respondents get an ephemeral (only-visible-to-them) acknowledgment
 - **Three response types**: "I know", "I don't know", and "Custom message" for easy feedback
+- **Message retention**: optionally delete each DM or broadcast automatically after a number of minutes, hours, or days
+- **Broadcast cleanup**: once a broadcast reaches its response threshold, the channel post is deleted and the status is shown only ephemerally
 - **Two independent closure pools**: manual DM messages close via a hunt-wide 3-"I know" threshold; each broadcast message closes via its own local thresholds (3 "I know" OR 5 total responses, whichever first) — the two counter systems are fully decoupled
 - **Privacy-first**: Never posts to public channels, reads private DMs, or displays affinity scores
 
@@ -107,6 +109,10 @@ The bot will connect to Slack via Socket Mode and respond to `/reach` commands. 
 health server listens on `0.0.0.0:$PORT` (default 8000) and serves only `GET /health`;
 it carries no Slack traffic and exists for Render's health check and the keep-alive ping
 (see [Deployment](#deployment)).
+
+To remove messages sent before retention support was introduced, run
+`/reach-cleanup confirm`. This only deletes messages tracked as Reach bot messages;
+it does not search for or remove unrelated workspace messages.
 
 ### Testing
 

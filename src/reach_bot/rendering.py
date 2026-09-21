@@ -59,6 +59,11 @@ SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("channel", "Everyone in a channel"),
     ("workspace", "Everyone in the workspace"),
 )
+RETENTION_UNITS: tuple[tuple[str, str], ...] = (
+    ("minutes", "Minutes"),
+    ("hours", "Hours"),
+    ("days", "Days"),
+)
 
 
 def render_reach_stage2(
@@ -70,6 +75,8 @@ def render_reach_stage2(
     initial_candidates: list[str] | None = None,
     initial_channel: str | None = None,
     message_value: str | None = None,
+    retention_amount: str | None = None,
+    retention_unit: str = "hours",
 ) -> dict[str, Any]:
     """Stage 2: the recipient-selection modal, built from static content.
 
@@ -147,6 +154,42 @@ def render_reach_stage2(
                 "multiline": False,
             },
         }
+    )
+    unit_options = [
+        {"text": {"type": "plain_text", "text": label}, "value": value}
+        for value, label in RETENTION_UNITS
+    ]
+    if retention_unit not in {value for value, _ in RETENTION_UNITS}:
+        retention_unit = "hours"
+    blocks.extend(
+        [
+            {
+                "type": "input",
+                "block_id": "retention_amount",
+                "label": {"type": "plain_text", "text": "Keep the message for (optional)"},
+                "optional": True,
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "retention_amount_input",
+                    "initial_value": retention_amount or "",
+                    "placeholder": {"type": "plain_text", "text": "e.g. 2"},
+                    "multiline": False,
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "retention_unit",
+                "label": {"type": "plain_text", "text": "Time unit"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "retention_unit_choice",
+                    "options": unit_options,
+                    "initial_option": next(
+                        option for option in unit_options if option["value"] == retention_unit
+                    ),
+                },
+            },
+        ]
     )
     return {
         "type": "modal",
@@ -358,8 +401,12 @@ def render_reach_stage3(
     requester_id: str = "",
     message_value: str = "",
     initial_channels: list[str] | None = None,
+    retention_amount: str | None = None,
+    retention_unit: str = "hours",
 ) -> dict[str, Any]:
     """Stage 3: multi-channel picker shown when 'channel' scope chosen."""
+    if retention_unit not in {value for value, _ in RETENTION_UNITS}:
+        retention_unit = "hours"
     channels_element: dict[str, Any] = {
         "type": "multi_conversations_select",
         "action_id": "channels_choice",
@@ -398,6 +445,38 @@ def render_reach_stage3(
                     "initial_value": message_value,
                     "placeholder": {"type": "plain_text", "text": "Type a short message"},
                     "multiline": False,
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "retention_amount",
+                "label": {"type": "plain_text", "text": "Keep the message for (optional)"},
+                "optional": True,
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "retention_amount_input",
+                    "initial_value": retention_amount or "",
+                    "placeholder": {"type": "plain_text", "text": "e.g. 2"},
+                    "multiline": False,
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "retention_unit",
+                "label": {"type": "plain_text", "text": "Time unit"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "retention_unit_choice",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": label}, "value": value}
+                        for value, label in RETENTION_UNITS
+                    ],
+                    "initial_option": {
+                        "text": {"type": "plain_text", "text": next(
+                            label for value, label in RETENTION_UNITS if value == retention_unit
+                        )},
+                        "value": retention_unit,
+                    },
                 },
             },
             {

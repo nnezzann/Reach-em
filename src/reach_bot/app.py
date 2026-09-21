@@ -16,7 +16,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
 from reach_bot.config import get_settings
-from reach_bot.handlers import register_handlers
+from reach_bot.handlers import delete_expired_messages, register_handlers
 from reach_bot.persistence import MemoryRepository, PostgresRepository, ReachRepository
 
 settings = get_settings()
@@ -88,6 +88,16 @@ async def run_socket_mode(app_token: str) -> None:
     await handler.start_async()  # type: ignore[no-untyped-call]
 
 
+async def run_message_cleanup() -> None:
+    """Periodically remove tracked messages whose retention has elapsed."""
+    while True:
+        try:
+            await delete_expired_messages(repository, slack_app.client)
+        except Exception:
+            log.exception("message retention cleanup failed")
+        await asyncio.sleep(60)
+
+
 async def main() -> None:
     """Run the Socket Mode handler and the health server concurrently.
 
@@ -99,6 +109,7 @@ async def main() -> None:
     await asyncio.gather(
         run_socket_mode(settings.slack_app_token),
         run_health_server(),
+        run_message_cleanup(),
     )
 
 
