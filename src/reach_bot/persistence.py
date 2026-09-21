@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from reach_bot.ranking import Affinity
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -171,11 +175,30 @@ class RedisPresenceCache:
         self.client.setex(f"presence:{user_id}", ttl_seconds, presence)  # type: ignore[attr-defined]
 
 
+def apply_migrations(connection: Any) -> None:
+    """Run every ``.sql`` migration in ``src/reach_bot/migrations`` in order.
+
+    Called once when ``PostgresRepository`` is instantiated, before any
+    query that assumes the tables exist. The migrations are idempotent
+    (``CREATE TABLE IF NOT EXISTS``), so re-running on every startup is safe.
+    """
+    migrations_dir = Path(__file__).parent / "migrations"
+    if not migrations_dir.is_dir():
+        return
+    for migration_file in sorted(migrations_dir.glob("*.sql")):
+        sql = migration_file.read_text()
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+        connection.commit()
+        log.info("Applied migration %s", migration_file.name)
+
+
 class PostgresRepository:
     """Synchronous repository for short Slack interaction transactions."""
 
     def __init__(self, connection: Any) -> None:
         self.connection = connection
+        apply_migrations(connection)
 
     def create_ping(
         self,
