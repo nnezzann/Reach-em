@@ -199,6 +199,14 @@ async def _finish_broadcast_response(
     know, total, closed_now = repository.increment_broadcast_counts(
         ping.id, counts_toward_known
     )
+    log.info(
+        "broadcast response ping=%s responder=%s know_count=%s total_count=%s closed_now=%s",
+        ping.id,
+        responder_id,
+        know,
+        total,
+        closed_now,
+    )
     await _post_ephemeral(
         client,
         channel or ping.channel,

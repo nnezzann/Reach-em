@@ -1034,6 +1034,17 @@ def test_broadcast_first_response_does_not_close_message() -> None:
     assert client.message_updates == []
 
 
+def test_broadcast_first_i_know_does_not_show_cutoff_status() -> None:
+    repo = BroadcastRepo()
+    app, client = _register(repository=repo)
+
+    _submit_location_on_broadcast(app, client)
+
+    assert client.ephemerals == [("C1", "U-responder", "Thanks for your response!")]
+    assert CUTOFF_STATUS not in [item[2] for item in client.ephemerals]
+    assert client.message_updates == []
+
+
 def test_broadcast_response_never_touches_dm_global_counter() -> None:
     repo = BroadcastRepo()
     app, client = _register(repository=repo)
