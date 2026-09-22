@@ -1,17 +1,19 @@
 # Reach'em
 
-Reach'em is a Slack bot that helps a requester reach the smallest useful audience when a teammate is unavailable. Instead of posting in a shared channel and interrupting dozens of people, the bot allows requesters to manually select specific people to reach via direct messages, with optional broadcast scopes for channel or workspace-wide reach.
+Reach'em is a Slack bot that helps a requester reach the smallest useful audience when a teammate is unavailable. Instead of posting in a shared channel and interrupting dozens of people, the bot lets requesters select specific people for direct messages or deliberately choose a public-channel/workspace broadcast.
 
 ## Features
 
 - **Manual recipient selection**: Requesters pick specific people to reach via a multi-user picker
-- **Broadcast scopes**: Option to reach everyone in a channel or the entire workspace  
+- **Broadcast scopes**: Option to reach everyone in selected public channels or across all public workspace channels
+- **Two-stage reach flow**: `/reach` opens a target picker, then updates the same modal with recipients, scope, message, and required retention duration; channel broadcasts add a final channel-selection stage
 - **Per-responder acknowledgment**: DM respondents see an in-place thank-you edit; broadcast respondents get an ephemeral (only-visible-to-them) acknowledgment
 - **Three response types**: "I know", "I don't know", and "Custom message" for easy feedback
 - **Message retention**: automatically delete each DM or broadcast after a required number of minutes, hours, or days
 - **Broadcast cleanup**: once a broadcast reaches its response threshold, the channel post is deleted and the status is shown only ephemerally
 - **Two independent closure pools**: manual DM messages close via a hunt-wide 3-"I know" threshold; each broadcast message closes via its own local thresholds (3 "I know" OR 5 total responses, whichever first) — the two counter systems are fully decoupled
-- **Privacy-first**: Never posts to public channels, reads private DMs, or displays affinity scores
+- **Bot-relay delivery**: Messages are sent by Reach and identify the requester and target; send-as-user OAuth is not implemented
+- **Privacy boundaries**: The bot does not read private DMs or expose affinity scores; public-channel broadcasting is explicit and requester-selected
 
 ## Slack App Setup
 
@@ -30,13 +32,15 @@ Reach'em is a Slack bot that helps a requester reach the smallest useful audienc
 
 Navigate to **Bot Permissions** and add the following scopes:
 
-- `commands` - Required for `/reach` slash command
-- `chat:write` - Required to send DMs to recipients
-- `channels:read` - Required to read public channel members for broadcast
-- `groups:read` - Required to read private channel members for broadcast
-- `users:read` - Required to resolve user profiles
-- `im:write` - Required to send direct messages
-- `im:history` - Required for message management
+- `app_mentions:read` - App mention event support
+- `channels:history` - Public-channel message/event access
+- `channels:read` - Public-channel discovery
+- `chat:write` - Send and delete Reach messages
+- `commands` - `/reach` and `/reach-cleanup` slash commands
+- `groups:history` - Private-channel event support
+- `im:history` and `im:write` - Direct-message delivery and event support
+- `mpim:history` - Group-DM event support
+- `users:read` - Resolve target profiles and display names
 
 ### 4. Enable Socket Mode
 
@@ -90,12 +94,14 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token-here
 SLACK_APP_TOKEN=xapp-your-app-token-here
 ```
 
-5. Optionally configure database and Redis for production features:
+5. Configure PostgreSQL for persistent production storage. Redis remains optional and is currently only used by dormant presence-cache code:
 
 ```
 DATABASE_URL=postgresql://user:password@localhost/reachem
 REDIS_URL=redis://localhost:6379
 ```
+
+If `DATABASE_URL` is omitted, the app falls back to an in-memory repository. That is useful for local experiments, but all tracked requests, pings, response counters, and retention state disappear when the process restarts.
 
 ### Running the Bot
 
@@ -105,10 +111,11 @@ Run the app (Socket Mode handler + health server, in one process):
 uv run python app.py
 ```
 
-The bot will connect to Slack via Socket Mode and respond to `/reach` commands. The
-health server listens on `0.0.0.0:$PORT` (default 8000) and serves only `GET /health`;
-it carries no Slack traffic and exists for Render's health check and the keep-alive ping
-(see [Deployment](#deployment)).
+The bot connects to Slack via Socket Mode and responds to `/reach` and
+`/reach-cleanup confirm`. The health server listens on `0.0.0.0:$PORT` (default 8000)
+and serves only `GET /health`; it carries no Slack traffic. Each health request is logged
+at `INFO` level as `GET /health` and exists for Render's health check and an external
+keep-alive monitor (see [Deployment](#deployment)).
 
 To remove messages sent before retention support was introduced, run
 `/reach-cleanup confirm`. This only deletes messages tracked as Reach bot messages;
@@ -140,27 +147,35 @@ The bot uses a simple architecture with clear separation of concerns:
 
 The ranking/suggestion machinery is currently dormant; the bot uses manual recipient selection only. The ranking modules (`reach_bot.ranking`, `reach_bot.affinity`, `reach_bot.slack_provider`) are preserved for possible future use.
 
+### Current reach flow
+
+1. `/reach` opens Stage 1 with a target user picker.
+2. Submitting Stage 1 updates the same modal to Stage 2. The requester selects hand-picked recipients, chooses no broadcast, a channel broadcast, or a workspace broadcast, edits the message, and supplies a required retention duration in minutes, hours, or days.
+3. A channel broadcast pushes a final channel-selection view. Workspace broadcasts resolve all non-archived public channels in the background.
+4. Hand-picked recipients receive synchronous bot-relay DMs. Broadcast fan-out runs as a background task and is deduplicated by the stored ping records.
+5. Recipients can choose `I know`, `I don't know`, or `Custom message`.
+
+Manual DMs and broadcasts use separate response pools. Manual DMs use a request-wide limit of three `I know` responses. Each broadcast message closes independently at three `I know` responses or five total responses, whichever comes first. Broadcast responses never affect the DM counter.
+
 ## Privacy & Security
 
 - No tokens or message contents are logged
-- The bot never posts to public channels
-- The bot never reads private channels or DMs
+- Public-channel posts happen only when the requester explicitly chooses a broadcast scope
+- The bot does not read private DMs; workspace broadcast resolution uses public channels only
 - All suggestions are ephemeral (no persistent ranking displayed)
 - Affinity scores are kept internal to ranking and never exposed as leaderboards
 
 ## Deployment
 
 The bot is deployed as a **Render free-tier Web Service** that talks to Slack entirely
-over **Socket Mode** (HTTP mode / Slack Request URLs were considered and explicitly
-rejected — there is no webhook endpoint and no `SLACK_SIGNING_SECRET` anywhere in this
-deployment).
+over **Socket Mode**. HTTP mode / Slack Request URLs are not used: there is no webhook
+endpoint and no `SLACK_SIGNING_SECRET` in this deployment.
 
 ### Why a Web Service, not a Background Worker
 
 Render's free plan does not offer Background Workers, so the long-lived Socket Mode
-process must be deployed as `type: web`. A Web Service has to bind `$PORT` and answer
-HTTP requests to stay up, which is the *only* reason any HTTP server exists in this
-project:
+process is deployed as `type: web`. A Web Service has to bind `$PORT` and answer HTTP
+requests to stay up, which is the *only* reason any HTTP server exists in this project:
 
 - the **Socket Mode handler** — the sole Slack event path (unchanged), and
 - a **minimal `aiohttp` health server** exposing `GET /health` → `200 {"status": "ok"}`
@@ -169,7 +184,8 @@ project:
   exists purely for Render's service-level health check and the keep-alive ping below.
 
 Both run concurrently in the same process (`asyncio.gather` in `src/reach_bot/app.py`),
-and Render restarts the service automatically on crashes.
+alongside the periodic message-retention cleanup task. Render restarts the service
+automatically on crashes.
 
 ### `render.yaml`
 
@@ -207,12 +223,14 @@ Set these as **secrets in the Render dashboard** — never in the repo or in
 dormant presence cache). `SLACK_SIGNING_SECRET` is **not** needed — it applies only to
 HTTP-mode request verification.
 
-### Keep-alive (GitHub Actions)
+### Keep-alive
 
 Render's free tier spins idle web services down after ~15 minutes of inactivity, and
-Render does not officially support pinging to prevent that. So
-`.github/workflows/keep-alive.yml` pings `${RENDER_APP_URL}/health` with `curl -f`
-every 10 minutes, failing the run on anything other than 200.
+Render does not officially support synthetic traffic as a permanent uptime mechanism.
+The repository includes `.github/workflows/keep-alive.yml` as a best-effort backup that
+pings `${RENDER_APP_URL}/health` with `curl -f` every 10 minutes during its configured
+UTC window. GitHub scheduled workflows can be delayed or dropped, so this is not a
+hard real-time scheduler.
 
 1. Set `RENDER_APP_URL` as a **repo variable** in the GitHub repository's
    *Settings → Variables* (a plain, non-sensitive URL — hence a variable, not a
@@ -237,6 +255,22 @@ every 10 minutes, failing the run on anything other than 200.
    deliberate cost/uptime tradeoff for the free tier — revisit it if it matters in
    practice (narrow the quiet window, or move off the free tier).
 
+### External monitor alternative
+
+For more predictable keep-alive traffic, configure an external HTTP monitor such as
+UptimeRobot or cron-job.org to send `GET https://<your-app>.onrender.com/health` and
+treat HTTP 200 as success.
+
+For cron-job.org, use `*/10 4-23 * * *` with the `Africa/Kigali` timezone. This keeps
+the local 00:00–04:00 quiet window while sending requests every 10 minutes from
+04:00 through 23:50 local time. If the scheduler is configured for UTC instead, use
+`*/10 2-21 * * *`.
+
+This is operational infrastructure outside the repository; the GitHub workflow can
+remain enabled as a second check. A 24/7 external monitor keeps the service awake more
+consistently but consumes nearly all of Render's 750 free instance-hours/month, so the
+quiet window is intentional.
+
 ### Reconnection
 
 No custom reconnection logic is needed: Bolt's `AsyncSocketModeHandler` reconnects
@@ -245,9 +279,20 @@ cycle — look for a fresh "session established" log line after each cold start.
 
 ### Database migrations
 
-Apply `src/reach_bot/migrations/` against the Supabase/Postgres database in order
-(`001_initial.sql`, then `002_response_limit.sql`). Migrations are versioned SQL and
-there is no in-app migration runner.
+PostgreSQL migrations in `src/reach_bot/migrations/` run automatically when
+`PostgresRepository` starts. The runner records applied versions in
+`reach_schema_migrations`, uses a PostgreSQL advisory lock during deploy overlap, and
+detects already-satisfied schema changes so it does not repeatedly take DDL locks.
+The current migration sequence is:
+
+1. `001_initial.sql` — base tables and indexes
+2. `002_response_limit.sql` — response counters and message coordinates
+3. `003_broadcast_local_thresholds.sql` — per-broadcast counters and response ledger
+4. `004_message_retention.sql` — expiry and deletion tracking
+5. `005_repair_broadcast_threshold_state.sql` — repairs persisted broadcast counters
+
+If `DATABASE_URL` is omitted, the app intentionally falls back to in-memory storage;
+tracked requests, pings, counters, and retention state are then lost on restart.
 
 ### Positioning
 
