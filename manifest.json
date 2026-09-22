@@ -17,7 +17,8 @@
         "slash_commands": [
             {
                 "command": "/reach",
-                "description": "Find the right people to reach when a teammate is unavailable.",
+                "description": "Quickly reach people or channels when a teammate is unavailable.",
+                "usage_hint": "[@username] [#channel]",
                 "should_escape": true
             },
             {
@@ -36,6 +37,7 @@
                 "channels:read",
                 "chat:write",
                 "commands",
+                "groups:read",
                 "groups:history",
                 "im:history",
                 "im:write",
