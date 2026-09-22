@@ -180,6 +180,21 @@ async def _resolve_channel_tokens(client: Any, tokens: list[str]) -> tuple[list[
     return [channel for channel in dict.fromkeys(resolved) if channel], None
 
 
+async def _target_display_name(client: Any, target_id: str) -> str | None:
+    try:
+        info = await client.users_info(user=target_id)
+        profile = info.get("user", {}).get("profile", {})
+        return str(
+            profile.get("display_name")
+            or info.get("user", {}).get("real_name")
+            or info.get("user", {}).get("name")
+            or ""
+        ).strip() or None
+    except SlackApiError as exc:
+        log.warning("users_info failed for shortcut target=%s: %s", target_id, exc)
+        return None
+
+
 def _quick_submit_view(
     metadata: dict[str, Any],
     *,
@@ -423,13 +438,17 @@ def register_handlers(
                 await respond(response_type="ephemeral", text=user_error or channel_error)
                 return
             requester_id = str(command.get("user_id", ""))
+            target_name = await _target_display_name(client, target_ids[0]) if target_ids else None
             if target_ids and not channel_ids:
-                view = render_quick_people_modal(target_ids[0], requester_id=requester_id)
+                view = render_quick_people_modal(
+                    target_ids[0], requester_id=requester_id, target_name=target_name
+                )
             elif channel_ids:
                 view = render_quick_channels_modal(
                     requester_id=requester_id,
                     target_id=target_ids[0] if target_ids else "",
                     initial_channels=channel_ids,
+                    target_name=target_name,
                 )
             else:
                 view = render_reach_stage1()

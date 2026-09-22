@@ -59,7 +59,7 @@ def render_quick_people_modal(
     target_id: str, *, requester_id: str, target_name: str | None = None
 ) -> dict[str, Any]:
     """Compact `/reach @person` modal: manual recipients plus message only."""
-    target_name = target_name or target_id
+    target_name = target_name or "that person"
     return {
         "type": "modal",
         "callback_id": "reach_quick_people_submit",
@@ -109,7 +109,7 @@ def render_quick_channels_modal(
             {
                 "requester_id": requester_id,
                 "target_id": target_id,
-                "target_name": target_name or target_id,
+                "target_name": target_name or "that person",
             },
             separators=(",", ":"),
         ),
@@ -124,7 +124,7 @@ def render_quick_channels_modal(
                 "element": channels,
                 "optional": False,
             },
-            _quick_message_block(target_name or target_id),
+            _quick_message_block(target_name or "that person"),
         ],
     }
 
@@ -177,7 +177,7 @@ def render_reach_audience(
     if scope not in {value for value, _ in SCOPE_OPTIONS}:
         scope = "none"
     if target_name is None:
-        target_name = target_id
+        target_name = "that person"
     candidates_block: dict[str, Any] = {
         "type": "input",
         "block_id": "candidates",
@@ -256,7 +256,7 @@ def render_reach_message(
 ) -> dict[str, Any]:
     """Message stage: compose the message and choose its response window."""
     if target_name is None:
-        target_name = target_id
+        target_name = "that person"
     if retention_unit not in {value for value, _ in RETENTION_UNITS}:
         retention_unit = "hours"
     unit_options = [
