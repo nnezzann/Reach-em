@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -411,9 +412,41 @@ def _migration_schema_is_current(connection: Any, version: str) -> bool:
 class PostgresRepository:
     """Synchronous repository for short Slack interaction transactions."""
 
-    def __init__(self, connection: Any) -> None:
-        self.connection = connection
+    def __init__(
+        self,
+        connection: Any,
+        connection_factory: Callable[[], Any] | None = None,
+    ) -> None:
+        self._connection = connection
+        self._connection_factory = connection_factory
+        self._reconnect_lock = threading.Lock()
         apply_migrations(connection)
+
+    @property
+    def connection(self) -> Any:
+        """Return a usable connection, reconnecting after an idle disconnect.
+
+        Render/Supabase can close an idle database connection while the
+        process remains alive. Psycopg marks that connection as closed, but
+        the repository is shared by the Socket Mode handlers and background
+        cleanup task. Reconnect lazily at the next operation so one dropped
+        connection does not permanently disable persistence for the process.
+        """
+        connection = self._connection
+        if not getattr(connection, "closed", False) or self._connection_factory is None:
+            return connection
+
+        with self._reconnect_lock:
+            connection = self._connection
+            if not getattr(connection, "closed", False):
+                return connection
+
+            log.warning("database connection is closed; reconnecting")
+            replacement = self._connection_factory()
+            apply_migrations(replacement)
+            self._connection = replacement
+            log.info("database connection restored")
+            return replacement
 
     def create_ping(
         self,

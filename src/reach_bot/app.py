@@ -28,7 +28,15 @@ repository: ReachRepository = MemoryRepository()
 if settings.database_url:
     import psycopg
 
-    repository = PostgresRepository(psycopg.connect(settings.database_url))
+    database_url = settings.database_url
+
+    def connect_database() -> object:
+        return psycopg.connect(database_url)
+
+    repository = PostgresRepository(
+        connect_database(),
+        connection_factory=connect_database,
+    )
 
 slack_app = AsyncApp(token=settings.slack_bot_token)
 

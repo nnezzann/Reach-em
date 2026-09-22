@@ -1,4 +1,43 @@
+import threading
+
 from reach_bot.persistence import MemoryRepository, PingOutcome
+
+
+def test_postgres_repository_reconnects_closed_connection(monkeypatch) -> None:
+    from reach_bot.persistence import PostgresRepository
+
+    class Connection:
+        def __init__(self, closed: bool) -> None:
+            self.closed = closed
+
+    initial = Connection(closed=True)
+    replacement = Connection(closed=False)
+    migrations = []
+    monkeypatch.setattr(
+        "reach_bot.persistence.apply_migrations",
+        lambda connection: migrations.append(connection),
+    )
+
+    repository = PostgresRepository(initial, connection_factory=lambda: replacement)
+
+    assert repository.connection is replacement
+    assert repository.connection is replacement
+    assert migrations == [initial, replacement]
+
+
+def test_postgres_repository_without_factory_preserves_closed_connection() -> None:
+    from reach_bot.persistence import PostgresRepository
+
+    class Connection:
+        closed = True
+
+    connection = Connection()
+    repository = PostgresRepository.__new__(PostgresRepository)
+    repository._connection = connection
+    repository._connection_factory = None
+    repository._reconnect_lock = threading.Lock()
+
+    assert repository.connection is connection
 
 
 def test_memory_increment_known_count_is_sequential() -> None:
