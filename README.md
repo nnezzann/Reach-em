@@ -197,11 +197,11 @@ process that runs **both** the Socket Mode handler and the health server.
 Set these as **secrets in the Render dashboard** — never in the repo or in
 `render.yaml`:
 
-| Variable | Purpose |
-| --- | --- |
-| `SLACK_BOT_TOKEN` | Bot token (`xoxb-…`) |
+| Variable          | Purpose                                                                                                         |
+|-------------------|-----------------------------------------------------------------------------------------------------------------|
+| `SLACK_BOT_TOKEN` | Bot token (`xoxb-…`)                                                                                            |
 | `SLACK_APP_TOKEN` | App-level token (`xapp-…`) for the Socket Mode connection — still required here, unlike an HTTP-mode deployment |
-| `DATABASE_URL` | Supabase/Postgres connection string |
+| `DATABASE_URL`    | Supabase/Postgres connection string                                                                             |
 
 `PORT` is set automatically by Render. `REDIS_URL` remains optional (used only by the
 dormant presence cache). `SLACK_SIGNING_SECRET` is **not** needed — it applies only to
