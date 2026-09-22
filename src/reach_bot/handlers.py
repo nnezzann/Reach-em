@@ -407,7 +407,7 @@ def register_handlers(
         hand_picked = [user for user in candidates if user not in {target_id, requester_id}]
         text_hand_picked = (
             f"Yo, Reach'em here, <@{requester_id}> needs a quick talk with  "
-            f"<@{target_id}>:\n{message}"
+            f"<@{target_id}> (s)He says:\n{message}"
         )
         for candidate_id in hand_picked:
             # Suggestions are dormant: no computed channel context or
