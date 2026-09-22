@@ -1,56 +1,67 @@
 {
-  "display_information": {
-    "name": "Reach'em",
-    "description": "Reach the smallest useful audience when a teammate is unavailable.",
-    "background_color": "#1d1c1d"
-  },
-  "features": {
-    "app_home": {
-      "home_tab_enabled": false,
-      "messages_tab_enabled": true,
-      "messages_tab_read_only_enabled": false
+    "display_information": {
+        "name": "Reach'em",
+        "description": "Reach the smallest useful audience when a teammate is unavailable.",
+        "background_color": "#1d1c1d"
     },
-    "bot_user": {
-      "display_name": "Reach'em",
-      "always_online": true
+    "features": {
+        "app_home": {
+            "home_tab_enabled": false,
+            "messages_tab_enabled": true,
+            "messages_tab_read_only_enabled": false
+        },
+        "bot_user": {
+            "display_name": "Reach'em",
+            "always_online": true
+        },
+        "slash_commands": [
+            {
+                "command": "/reach",
+                "description": "Find the right people to reach when a teammate is unavailable.",
+                "should_escape": true
+            },
+            {
+                "command": "/reach-cleanup",
+                "description": "Remove Reach messages sent before retention was introduced.",
+                "usage_hint": "confirm",
+                "should_escape": false
+            }
+        ]
     },
-    "slash_commands": [
-      {
-        "command": "/reach",
-        "description": "Find the right people to reach when a teammate is unavailable.",
-        "usage_hint": "@username [optional note]",
-        "should_escape": false
-      },
-      {
-        "command": "/reach-cleanup",
-        "description": "Remove Reach messages sent before retention was introduced.",
-        "usage_hint": "confirm",
-        "should_escape": false
-      }
-    ]
-  },
-  "oauth_config": {
-    "scopes": {
-      "bot": [
-        "commands",
-        "chat:write",
-        "channels:read",
-        "groups:read",
-        "users:read",
-        "im:write",
-        "im:history"
-      ]
+    "oauth_config": {
+        "scopes": {
+            "bot": [
+                "app_mentions:read",
+                "channels:history",
+                "channels:read",
+                "chat:write",
+                "commands",
+                "groups:history",
+                "im:history",
+                "im:write",
+                "mpim:history",
+                "users:read"
+            ]
+        },
+        "pkce_enabled": false
     },
-    "pkce_enabled": false
-  },
-  "settings": {
-    "interactivity": {
-      "is_enabled": true
-    },
-    "org_deploy_enabled": false,
-    "socket_mode_enabled": true,
-    "token_rotation_enabled": false,
-    "app_level_token_rotation_enabled": false,
-    "is_mcp_enabled": false
-  }
+    "settings": {
+        "event_subscriptions": {
+            "bot_events": [
+                "app_mention",
+                "message.channels",
+                "message.groups",
+                "message.im",
+                "message.mpim"
+            ]
+        },
+        "interactivity": {
+            "is_enabled": true
+        },
+        "org_deploy_enabled": false,
+        "socket_mode_enabled": true,
+        "token_rotation_enabled": false,
+        "app_level_token_rotation_enabled": false,
+        "is_mcp_enabled": false
+    }
 }
