@@ -166,8 +166,8 @@ def render_reach_stage2(
             {
                 "type": "input",
                 "block_id": "retention_amount",
-                "label": {"type": "plain_text", "text": "Keep the message for (optional)"},
-                "optional": True,
+                "label": {"type": "plain_text", "text": "Keep the message for"},
+                "optional": False,
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "retention_amount_input",
@@ -450,8 +450,8 @@ def render_reach_stage3(
             {
                 "type": "input",
                 "block_id": "retention_amount",
-                "label": {"type": "plain_text", "text": "Keep the message for (optional)"},
-                "optional": True,
+                "label": {"type": "plain_text", "text": "Keep the message for"},
+                "optional": False,
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "retention_amount_input",

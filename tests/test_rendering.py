@@ -6,6 +6,7 @@ from reach_bot.rendering import (
     render_location_modal,
     render_reach_stage1,
     render_reach_stage2,
+    render_reach_stage3,
     render_recipient_actions,
     render_suggestions,
     render_why,
@@ -65,6 +66,8 @@ def test_reach_stage2_is_the_picker_modal():
     message = view["blocks"][2]
     assert message["element"]["initial_value"].startswith("Have you seen Grace?")
     assert view["blocks"][3]["element"]["action_id"] == "retention_amount_input"
+    assert view["blocks"][3]["label"]["text"] == "Keep the message for"
+    assert view["blocks"][3]["optional"] is False
     assert view["blocks"][4]["element"]["initial_option"]["value"] == "hours"
 
 
@@ -82,6 +85,14 @@ def test_reach_stage2_channel_picker_only_when_scope_is_channel():
     assert channel["element"]["filter"]["include"] == ["public", "private"]
     assert channel["element"]["initial_conversation"] == "C1"
     assert "broadcast_channel" not in [block["block_id"] for block in without_picker["blocks"]]
+
+
+def test_reach_stage3_requires_retention_duration():
+    view = render_reach_stage3("target", "requester")
+
+    retention = next(block for block in view["blocks"] if block["block_id"] == "retention_amount")
+    assert retention["label"]["text"] == "Keep the message for"
+    assert retention["optional"] is False
 
 
 def test_reach_stage2_rerender_preserves_current_input():

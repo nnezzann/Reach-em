@@ -53,6 +53,7 @@ def create_health_app() -> web.Application:
     """
 
     async def health(_request: web.Request) -> web.Response:
+        log.info("GET /health")
         return web.json_response({"status": "ok"})
 
     application = web.Application()

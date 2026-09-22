@@ -222,6 +222,14 @@ def test_submission_sends_message_to_selected_recipients() -> None:
                             "scope_choice": {"selected_option": {"value": "none"}}
                         },
                         "message": {"message_input": {"value": "Anyone seen them?"}},
+                        "retention_amount": {
+                            "retention_amount_input": {"value": "2"}
+                        },
+                        "retention_unit": {
+                            "retention_unit_choice": {
+                                "selected_option": {"value": "hours"}
+                            }
+                        },
                     }
                 },
             },
@@ -270,6 +278,14 @@ def test_submission_rejects_empty_candidates_with_none_scope() -> None:
                             "scope_choice": {"selected_option": {"value": "none"}}
                         },
                         "message": {"message_input": {"value": "Anyone seen them?"}},
+                        "retention_amount": {
+                            "retention_amount_input": {"value": "2"}
+                        },
+                        "retention_unit": {
+                            "retention_unit_choice": {
+                                "selected_option": {"value": "hours"}
+                            }
+                        },
                     }
                 },
             },
@@ -309,6 +325,14 @@ def test_submission_pushes_stage3_for_channel_scope() -> None:
                             "scope_choice": {"selected_option": {"value": "channel"}}
                         },
                         "message": {"message_input": {"value": "Anyone seen them?"}},
+                        "retention_amount": {
+                            "retention_amount_input": {"value": "2"}
+                        },
+                        "retention_unit": {
+                            "retention_unit_choice": {
+                                "selected_option": {"value": "hours"}
+                            }
+                        },
                     }
                 },
             },
@@ -350,6 +374,14 @@ def test_stage3_submit_requires_channels() -> None:
                     "values": {
                         "broadcast_channels": {"channels_choice": {"selected_conversations": []}},
                         "message": {"message_input": {"value": "Anyone seen them?"}},
+                        "retention_amount": {
+                            "retention_amount_input": {"value": "2"}
+                        },
+                        "retention_unit": {
+                            "retention_unit_choice": {
+                                "selected_option": {"value": "hours"}
+                            }
+                        },
                     }
                 },
             },
@@ -554,6 +586,14 @@ def test_stage3_submit_launches_channel_broadcast() -> None:
                             "channels_choice": {"selected_conversations": ["C1"]}
                         },
                         "message": {"message_input": {"value": "Anyone seen them?"}},
+                        "retention_amount": {
+                            "retention_amount_input": {"value": "2"}
+                        },
+                        "retention_unit": {
+                            "retention_unit_choice": {
+                                "selected_option": {"value": "hours"}
+                            }
+                        },
                     }
                 },
             },

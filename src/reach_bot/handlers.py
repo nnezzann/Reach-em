@@ -56,7 +56,7 @@ def _retention_expiry(values: dict[str, Any]) -> tuple[datetime | None, str | No
         or ""
     ).strip()
     if not raw_amount:
-        return None, None
+        return None, "Enter how long the message should remain."
     if not raw_amount.isdigit() or int(raw_amount) <= 0:
         return None, "Enter a positive whole number for the retention time."
     unit = str(
