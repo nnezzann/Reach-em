@@ -117,13 +117,15 @@ The application responds by updating the same modal using `views.update`.
 
 ---
 
-### 3.2 Stage 2
+### 3.2 Audience stage
 
-Stage 2 renders immediately when Stage 1 is submitted
+The Audience stage renders immediately when Stage 1 is submitted
 (`response_action: "update"`); there is no loading view because no
 candidate computation runs.
 
-Stage 2 contains these blocks, in order:
+It contains the people picker, broadcast scope, and the conditional
+channel picker. Submitting it validates the recipient source and pushes
+the Compose stage in the same modal stack.
 
 #### People picker
 
@@ -826,7 +828,14 @@ Previously sent messages are unaffected.
 
 ### 9.1 `/reach`
 
-The slash command takes no required arguments.
+The slash command accepts optional Slack user and channel shortcuts:
+
+```text
+/reach
+/reach @username
+/reach #channel
+/reach @username #channel
+```
 
 ```text
 /reach
@@ -835,8 +844,26 @@ The slash command takes no required arguments.
 The command:
 
 1. Verifies the Slack request.
-2. Opens Stage 1 of the modal.
-3. Does not post a public-channel message.
+2. With no arguments, opens Stage 1 of the modal.
+3. With a user shortcut, resolves the user to a Slack ID and opens the
+   compact manual-recipient modal.
+4. With one or more channel shortcuts, resolves channels to Slack IDs and
+   opens the compact channel modal. Only explicitly supplied channels may be
+   initialized; the app never assumes a `general` channel exists.
+5. With both forms, opens the compact channel modal with the target ID
+   carried through.
+6. Does not post a public-channel message until the requester submits a
+   modal.
+
+Plain `@username` and `#channel` tokens are resolved against Slack's user and
+conversation lists. Canonical Slack tokens (`<@U…>` and `<#C…|name>`) use the
+embedded IDs directly. Ambiguous or missing names receive an ephemeral error.
+All outgoing mentions are generated from resolved IDs, never from command
+text.
+
+Quick modals omit broadcast radio buttons and the response-window fields.
+They use the configured quick-path retention default internally so message
+cleanup and all response-counting behavior remain unchanged.
 
 ---
 
@@ -859,35 +886,37 @@ candidate ranking
       ↓
 views.update
       ↓
-Stage 2 rendered
+Audience stage rendered
 ```
 
 The same modal is updated in place.
 
 ---
 
-### 9.3 Stage 2 rendering
+### 9.3 Audience and Compose rendering
 
 The application renders, in order:
 
 * Optional multi-user people picker (`candidates`).
 * Broadcast scope radio buttons (`broadcast_scope`), default "None".
 * Channel picker (`broadcast_channel`) only when the scope is "channel".
-* Editable message field (`message`).
-* Send action.
+The Compose stage then renders the editable message field (`message`),
+the required response-window amount (`retention_amount`), and time unit
+(`retention_unit`), followed by the Send action.
 
 A `scope_choice` block_actions listener re-renders the modal via
 `views.update` to insert or remove the channel picker, preserving the
 requester's current input.
 
-No candidate computation runs between Stage 1 and Stage 2; the modal
-update happens inside the submit acknowledgement.
+No candidate computation runs between stages; the Audience update happens
+inside the Stage 1 submit acknowledgement and the Compose view is pushed
+inside the Audience submit acknowledgement.
 
 ---
 
-### 9.4 Send submission
+### 9.4 Audience and send submissions
 
-On submission:
+The Audience submission:
 
 1. Validate the selected target.
 2. Collect hand-picked recipients from `candidates`.
@@ -895,11 +924,16 @@ On submission:
    `broadcast_channel` (validation error if missing).
 4. Require at least one recipient source (people picker or non-"None"
    scope).
-5. Generate the final message.
-6. Send one message to every hand-picked recipient synchronously.
-7. Persist one `Ping` per actual recipient and attach the three response
+5. Push Compose while carrying the audience selection in private metadata.
+
+The Compose submission:
+
+1. Validate the message and response window.
+2. Generate the final message.
+3. Send one message to every hand-picked recipient synchronously.
+4. Persist one `Ping` per actual recipient and attach the three response
    actions.
-8. For a non-"None" scope, launch the background fan-out with the
+5. For a non-"None" scope, launch the background fan-out with the
    matching resolution strategy (`conversations.members` or
    `users.list`), deduplicated against the hand-picked recipients.
 

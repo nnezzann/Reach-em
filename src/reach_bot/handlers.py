@@ -19,9 +19,11 @@ from reach_bot.rendering import (
     mrkdwn_section,
     render_location_modal,
     render_ping_modal,
+    render_quick_channels_modal,
+    render_quick_people_modal,
+    render_reach_audience,
+    render_reach_message,
     render_reach_stage1,
-    render_reach_stage2,
-    render_reach_stage3,
     render_recipient_actions,
     render_reply_modal,
 )
@@ -46,6 +48,8 @@ RETENTION_FEATURE_INTRODUCED_AT = datetime(2026, 9, 21, tzinfo=UTC)
 
 # Background fan-out tasks; kept referenced so they are not garbage-collected.
 _background_tasks: set[asyncio.Task[Any]] = set()
+_USER_TOKEN = re.compile(r"^<@([A-Z0-9]+)>$|^@([A-Za-z0-9_.-]+)$")
+_CHANNEL_TOKEN = re.compile(r"^<#([A-Z0-9]+)(?:\|[^>]+)?>$|^#([A-Za-z0-9_.-]+)$")
 
 
 def _retention_expiry(values: dict[str, Any]) -> tuple[datetime | None, str | None]:
@@ -69,6 +73,131 @@ def _retention_expiry(values: dict[str, Any]) -> tuple[datetime | None, str | No
     if unit not in factors:
         return None, "Choose minutes, hours, or days for the retention unit."
     return datetime.now(UTC) + timedelta(seconds=int(raw_amount) * factors[unit]), None
+
+
+def _shortcut_tokens(text: str) -> tuple[list[str], list[str]]:
+    users: list[str] = []
+    channels: list[str] = []
+    for raw in text.split():
+        token = raw.strip(",")
+        if _USER_TOKEN.match(token):
+            users.append(token)
+        elif _CHANNEL_TOKEN.match(token):
+            channels.append(token)
+    return users, channels
+
+
+async def _resolve_user_tokens(client: Any, tokens: list[str]) -> tuple[list[str], str | None]:
+    if not tokens:
+        return [], None
+    canonical_ids = [_USER_TOKEN.match(token) for token in tokens]
+    if all(match is not None and match.group(1) for match in canonical_ids):
+        return [str(match.group(1)) for match in canonical_ids if match is not None], None
+    response = await client.users_list(limit=200)
+    users = [
+        user
+        for user in response.get("members", response.get("users", []))
+        if not user.get("deleted")
+    ]
+    resolved: list[str] = []
+    for token in tokens:
+        match = _USER_TOKEN.match(token)
+        if not match:
+            continue
+        if match.group(1):
+            resolved.append(match.group(1))
+            continue
+        name = match.group(2).casefold()
+        matches = [
+            user
+            for user in users
+            if name
+            in {
+                str(user.get("name", "")).casefold(),
+                str(user.get("real_name", "")).casefold(),
+                str(user.get("profile", {}).get("display_name", "")).casefold(),
+            }
+        ]
+        if len(matches) != 1:
+            return [], f"I couldn't uniquely identify `{token}`. Use Slack's user mention picker."
+        resolved.append(str(matches[0].get("id", "")))
+    return [user for user in dict.fromkeys(resolved) if user], None
+
+
+async def _resolve_channel_tokens(client: Any, tokens: list[str]) -> tuple[list[str], str | None]:
+    if not tokens:
+        return [], None
+    canonical_ids = [_CHANNEL_TOKEN.match(token) for token in tokens]
+    if all(match is not None and match.group(1) for match in canonical_ids):
+        return [str(match.group(1)) for match in canonical_ids if match is not None], None
+    response = await client.conversations_list(
+        types="public_channel,private_channel", exclude_archived=True, limit=200
+    )
+    channels = [
+        channel
+        for channel in response.get("channels", [])
+        if not channel.get("is_archived")
+    ]
+    resolved: list[str] = []
+    for token in tokens:
+        match = _CHANNEL_TOKEN.match(token)
+        if not match:
+            continue
+        if match.group(1):
+            resolved.append(match.group(1))
+            continue
+        name = match.group(2).casefold()
+        matches = [
+            channel for channel in channels if str(channel.get("name", "")).casefold() == name
+        ]
+        if len(matches) != 1:
+            return [], (
+                f"I couldn't uniquely identify `{token}`. "
+                "Choose the channel from Slack's picker."
+            )
+        resolved.append(str(matches[0].get("id", "")))
+    return [channel for channel in dict.fromkeys(resolved) if channel], None
+
+
+def _quick_submit_view(
+    metadata: dict[str, Any],
+    *,
+    candidates: list[str],
+    scope: str,
+    channel_ids: list[str],
+    message_values: dict[str, Any],
+    retention_hours: int,
+) -> dict[str, Any]:
+    """Adapt a compact modal's state to the regular message submission shape."""
+    return {
+        "private_metadata": json.dumps(
+            {
+                **metadata,
+                "candidates": candidates,
+                "scope": scope,
+                "channel_ids": channel_ids,
+            },
+            separators=(",", ":"),
+        ),
+        "state": {
+            "values": {
+                "message": message_values,
+                "retention_amount": {
+                    "retention_amount_input": {"value": str(retention_hours)}
+                },
+                "retention_unit": {
+                    "retention_unit_choice": {
+                        "selected_option": {"value": "hours"}
+                    }
+                },
+            }
+        },
+    }
+
+
+def _target_reference(target_id: str) -> str:
+    """Return a safe mention when a target exists, or neutral channel wording."""
+    return f"<@{target_id}>" if target_id else "the person being sought"
 
 
 async def _set_ping_expiry(
@@ -240,6 +369,7 @@ def register_handlers(
     *,
     repository: ReachRepository,
     known_response_limit: int = 3,
+    quick_reach_retention_hours: int = 2,
 ) -> None:
     @slack_app.command("/reach")  # type: ignore[untyped-decorator]
     async def reach_command(
@@ -253,7 +383,37 @@ def register_handlers(
         # (including the views_open network request below) eats into it.
         await ack()
         try:
-            await client.views_open(trigger_id=command["trigger_id"], view=render_reach_stage1())
+            text = str(command.get("text", "")).strip()
+            user_tokens, channel_tokens = _shortcut_tokens(text)
+            if len(user_tokens) > 1:
+                await respond(
+                    response_type="ephemeral",
+                    text="Use at most one target person, for example `/reach @username #channel`.",
+                )
+                return
+            if text and not user_tokens and not channel_tokens:
+                await respond(
+                    response_type="ephemeral",
+                    text="Use `/reach`, `/reach @username`, `/reach #channel`, or both together.",
+                )
+                return
+            target_ids, user_error = await _resolve_user_tokens(client, user_tokens)
+            channel_ids, channel_error = await _resolve_channel_tokens(client, channel_tokens)
+            if user_error or channel_error:
+                await respond(response_type="ephemeral", text=user_error or channel_error)
+                return
+            requester_id = str(command.get("user_id", ""))
+            if target_ids and not channel_ids:
+                view = render_quick_people_modal(target_ids[0], requester_id=requester_id)
+            elif channel_ids:
+                view = render_quick_channels_modal(
+                    requester_id=requester_id,
+                    target_id=target_ids[0] if target_ids else "",
+                    initial_channels=channel_ids,
+                )
+            else:
+                view = render_reach_stage1()
+            await client.views_open(trigger_id=command["trigger_id"], view=view)
         except SlackApiError as exc:
             log.error("/reach Slack API error: %s", exc)
             await respond(
@@ -262,6 +422,61 @@ def register_handlers(
         except Exception as exc:
             log.exception("/reach unhandled error for user=%s", command.get("user_id"))
             await respond(response_type="ephemeral", text=f"Something went wrong: {exc}")
+
+    @slack_app.view("reach_quick_people_submit")  # type: ignore[untyped-decorator]
+    async def reach_quick_people_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+    ) -> None:
+        """Adapt the compact person shortcut into the normal send pipeline."""
+        metadata = json.loads(view.get("private_metadata", "{}"))
+        values = view["state"]["values"]
+        candidates = values.get("candidates", {}).get("candidates", {}).get("selected_users", [])
+        if not candidates:
+            await ack(response_action="errors", errors={"candidates": "Pick at least one person."})
+            return
+        await reach_message_submit(
+            ack=ack,
+            body=body,
+            view=_quick_submit_view(
+                metadata,
+                candidates=[str(candidate) for candidate in candidates],
+                scope="none",
+                channel_ids=[],
+                message_values=values.get("message", {}),
+                retention_hours=quick_reach_retention_hours,
+            ),
+            client=client,
+        )
+
+    @slack_app.view("reach_quick_channels_submit")  # type: ignore[untyped-decorator]
+    async def reach_quick_channels_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+    ) -> None:
+        """Adapt the compact channel shortcut into the normal send pipeline."""
+        metadata = json.loads(view.get("private_metadata", "{}"))
+        values = view["state"]["values"]
+        channel_ids = values.get("broadcast_channels", {}).get("channels_choice", {}).get(
+            "selected_conversations", []
+        )
+        if not channel_ids:
+            await ack(
+                response_action="errors",
+                errors={"broadcast_channels": "Pick at least one channel."},
+            )
+            return
+        await reach_message_submit(
+            ack=ack,
+            body=body,
+            view=_quick_submit_view(
+                metadata,
+                candidates=[],
+                scope="channel",
+                channel_ids=[str(channel) for channel in channel_ids],
+                message_values=values.get("message", {}),
+                retention_hours=quick_reach_retention_hours,
+            ),
+            client=client,
+        )
 
     @slack_app.command("/reach-cleanup")  # type: ignore[untyped-decorator]
     async def reach_cleanup_command(
@@ -317,27 +532,27 @@ def register_handlers(
             log.warning("users_info failed for target=%s: %s", target_id, exc)
         await ack(
             response_action="update",
-            view=render_reach_stage2(
+            view=render_reach_audience(
                 target_id, requester_id=requester_id, target_name=target_name
             ),
         )
 
-    @slack_app.view("reach_submit")  # type: ignore[untyped-decorator]
-    async def reach_submit(
+    @slack_app.view("reach_audience_submit")  # type: ignore[untyped-decorator]
+    async def reach_audience_submit(
         ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
     ) -> None:
-        """Handle Stage 2 submission (final message to selected candidates)."""
+        """Validate the audience, then open the message stage."""
         values = view["state"]["values"]
         metadata = json.loads(view.get("private_metadata", "{}"))
         target_id = str(metadata.get("target_id", "")).strip()
         if not target_id:
-            log.warning("reach_submit received a view without a target")
+            log.warning("reach_audience_submit received a view without a target")
             await ack(
                 response_action="errors",
-                errors={"message": "Select who you are trying to reach first."},
+                errors={"candidates": "Session expired. Restart /reach."},
             )
             return
-        requester_id = str(body["user"]["id"])
+        requester_id = str(metadata.get("requester_id") or body["user"]["id"])
         candidates = [
             str(user)
             for user in dict.fromkeys(
@@ -356,40 +571,6 @@ def register_handlers(
             .get("selected_conversation", "")
             or ""
         )
-        message = str(values["message"]["message_input"].get("value", "")).strip()
-        expires_at, retention_error = _retention_expiry(values)
-        if retention_error:
-            await ack(response_action="errors", errors={"retention_amount": retention_error})
-            return
-        # When "channel" scope chosen, push Stage 3 instead of sending.
-        # The multi-channel picker lives in Stage 3 (render_reach_stage3); the
-        # single `broadcast_channel` picker from Stage 2 is replaced by it.
-        # Carry requester/target and the typed message through private_metadata
-        # so the Stage 3 submit handler can compose and send without another
-        # lookup (render_reach_stage3 also restores the message text).
-        if scope == "channel":
-            await ack(
-                response_action="push",
-                view=render_reach_stage3(
-                    target_id=target_id,
-                    requester_id=requester_id,
-                    message_value=message,
-                    initial_channels=[channel_id] if channel_id else None,
-                    retention_amount=str(
-                        values.get("retention_amount", {})
-                        .get("retention_amount_input", {})
-                        .get("value", "")
-                        or ""
-                    ),
-                    retention_unit=str(
-                        values.get("retention_unit", {})
-                        .get("retention_unit_choice", {})
-                        .get("selected_option", {})
-                        .get("value", "hours")
-                    ),
-                ),
-            )
-            return
         if not candidates and scope == "none":
             await ack(
                 response_action="errors",
@@ -398,8 +579,45 @@ def register_handlers(
                 },
             )
             return
+        if scope == "channel" and not channel_id:
+            await ack(response_action="errors", errors={"broadcast_channel": "Pick a channel."})
+            return
+        await ack(
+            response_action="push",
+            view=render_reach_message(
+                target_id,
+                requester_id=requester_id,
+                target_name=str(metadata.get("target_name", "")) or None,
+                candidates=candidates,
+                scope=scope,
+                channel_id=channel_id,
+            ),
+        )
+
+    @slack_app.view("reach_message_submit")  # type: ignore[untyped-decorator]
+    async def reach_message_submit(
+        ack: Callable[..., Awaitable[None]], body: dict[str, Any], view: dict[str, Any], client: Any
+    ) -> None:
+        """Send the composed message after the audience stage is complete."""
+        values = view["state"]["values"]
+        metadata = json.loads(view.get("private_metadata", "{}"))
+        target_id = str(metadata.get("target_id", "")).strip()
+        requester_id = str(metadata.get("requester_id") or body["user"]["id"])
+        candidates = [str(user) for user in dict.fromkeys(metadata.get("candidates", []))]
+        scope = str(metadata.get("scope", "none"))
+        if not target_id and scope != "channel":
+            await ack(
+                response_action="errors",
+                errors={"message": "Session expired. Restart /reach."},
+            )
+            return
+        message = str(values.get("message", {}).get("message_input", {}).get("value", "")).strip()
         if not message:
             await ack(response_action="errors", errors={"message": "Enter a message to send."})
+            return
+        expires_at, retention_error = _retention_expiry(values)
+        if retention_error:
+            await ack(response_action="errors", errors={"retention_amount": retention_error})
             return
         # Ack immediately before the slow DB writes and chat_postMessage calls.
         await ack()
@@ -448,9 +666,10 @@ def register_handlers(
                 str(response.get("ts", "")),
             )
             await _set_ping_expiry(repository, ping.id, expires_at)
-        if scope == "workspace":
+        if scope in {"workspace", "channel"}:
             # Workspace scope resolves all public workspace channels inside
-            # post_to_channels; nothing is selected here.
+            # post_to_channels. Channel scope posts only to the one channel
+            # selected in the audience stage.
             task = asyncio.create_task(
                 post_to_channels(
                     client,
@@ -459,7 +678,9 @@ def register_handlers(
                     requester_id=requester_id,
                     target_id=target_id,
                     scope=scope,
-                    channel_ids=[],
+                    channel_ids=[str(channel) for channel in metadata.get("channel_ids", [])]
+                    if scope == "channel"
+                    else [],
                     message=message,
                     known_response_limit=known_response_limit,
                     expires_at=expires_at,
@@ -493,30 +714,15 @@ def register_handlers(
             .get("selected_conversation", "")
             or ""
         )
-        message_value = state.get("message", {}).get("message_input", {}).get("value")
-        retention_amount = (
-            state.get("retention_amount", {})
-            .get("retention_amount_input", {})
-            .get("value")
-        )
-        retention_unit = (
-            state.get("retention_unit", {})
-            .get("retention_unit_choice", {})
-            .get("selected_option", {})
-            .get("value", "hours")
-        )
         await client.views_update(
             view_id=view["id"],
-            view=render_reach_stage2(
+            view=render_reach_audience(
                 str(metadata.get("target_id", "")),
                 requester_id=str(metadata.get("requester_id", "")),
                 target_name=str(metadata.get("target_name", "")) or None,
                 scope=scope,
                 initial_candidates=selected_users,
                 initial_channel=selected_channel if scope == "channel" else None,
-                message_value=message_value,
-                retention_amount=retention_amount,
-                retention_unit=str(retention_unit),
             ),
         )
 
@@ -676,7 +882,10 @@ def register_handlers(
                 return
             await client.chat_postMessage(
                 channel=ping.requester_id,
-                text=f"Reply about <@{ping.target_id}> from <@{responder_id}>:\n{reply}",
+                text=(
+                    f"Reply about {_target_reference(ping.target_id)} "
+                    f"from <@{responder_id}>:\n{reply}"
+                ),
             )
             await _finish_broadcast_response(
                 repository, client, ping, responder_id, modal_channel, False
@@ -686,7 +895,10 @@ def register_handlers(
             repository.record_outcome(PingOutcome(ping_id, "replied"))
             await client.chat_postMessage(
                 channel=ping.requester_id,
-                text=f"Reply about <@{ping.target_id}> from <@{responder_id}>:\n{reply}",
+                text=(
+                    f"Reply about {_target_reference(ping.target_id)} "
+                    f"from <@{responder_id}>:\n{reply}"
+                ),
             )
             await _apply_response_cleanup(client, ping)
 
@@ -734,7 +946,7 @@ def register_handlers(
                     channel=ping.requester_id,
                     text=(
                         f"<@{responder_id}> knows how to reach "
-                        f"<@{ping.target_id}> (s)He says:\n {location}"
+                        f"{_target_reference(ping.target_id)} (s)He says:\n {location}"
                     ),
                 )
             # Ephemeral ack to the responder; broadcast messages are never
@@ -762,7 +974,7 @@ def register_handlers(
                 channel=ping.requester_id,
                 text=(
                     f"<@{ping.candidate_id}> knows how to reach "
-                    f"<@{ping.target_id}> (s)He says:\n {location}"
+                    f"{_target_reference(ping.target_id)} (s)He says:\n {location}"
                 ),
             )
         await _apply_response_cleanup(client, ping)

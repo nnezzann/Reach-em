@@ -6,7 +6,8 @@ Reach'em is a Slack bot that helps a requester reach the smallest useful audienc
 
 - **Manual recipient selection**: Requesters pick specific people to reach via a multi-user picker
 - **Broadcast scopes**: Option to reach everyone in selected public channels or across all public workspace channels
-- **Two-stage reach flow**: `/reach` opens a target picker, then updates the same modal with recipients, scope, message, and required retention duration; channel broadcasts add a final channel-selection stage
+- **Fast slash-command shortcuts**: `/reach @username`, `/reach #channel`, and the combined form open compact modals with their IDs resolved by Slack
+- **Two-stage composition flow**: after the target picker, the same modal separates audience selection from message composition; channel selection appears inline only for channel broadcasts
 - **Per-responder acknowledgment**: DM respondents see an in-place thank-you edit; broadcast respondents get an ephemeral (only-visible-to-them) acknowledgment
 - **Three response types**: "I know", "I don't know", and "Custom message" for easy feedback
 - **Message retention**: automatically delete each DM or broadcast after a required number of minutes, hours, or days
@@ -150,10 +151,18 @@ The ranking/suggestion machinery is currently dormant; the bot uses manual recip
 ### Current reach flow
 
 1. `/reach` opens Stage 1 with a target user picker.
-2. Submitting Stage 1 updates the same modal to Stage 2. The requester selects hand-picked recipients, chooses no broadcast, a channel broadcast, or a workspace broadcast, edits the message, and supplies a required retention duration in minutes, hours, or days.
-3. A channel broadcast pushes a final channel-selection view. Workspace broadcasts resolve all non-archived public channels in the background.
+2. Submitting Stage 1 updates the same modal to the Audience stage. The requester selects hand-picked recipients and chooses no broadcast, a channel broadcast, or a workspace broadcast. Choosing a channel reveals one channel picker inline.
+3. Submitting Audience pushes the Compose stage, where the requester edits the message and supplies a required response window in minutes, hours, or days. Workspace broadcasts resolve all non-archived public channels in the background.
 4. Hand-picked recipients receive synchronous bot-relay DMs. Broadcast fan-out runs as a background task and is deduplicated by the stored ping records.
 5. Recipients can choose `I know`, `I don't know`, or `Custom message`.
+
+For fast use, `/reach @username` opens the manual-recipient modal directly,
+while `/reach #channel` opens the channel modal with only explicitly typed
+channels initialized. `/reach @username #channel` combines both. The quick
+modals omit scope radios and response-window inputs; they use the configured
+quick-path retention default. User and channel mentions are resolved to Slack
+IDs before any modal or outgoing message is built—no typed display name is
+used as a mention.
 
 Manual DMs and broadcasts use separate response pools. Manual DMs use a request-wide limit of three `I know` responses. Each broadcast message closes independently at three `I know` responses or five total responses, whichever comes first. Broadcast responses never affect the DM counter.
 

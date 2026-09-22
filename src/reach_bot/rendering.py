@@ -21,10 +21,11 @@ def broadcast_text(message: str, requester_id: str, target_id: str) -> str:
     `<!channel>` (NOT `<@channel>` — that is a literal user mention and will
     not notify anyone) is used for public-channel broadcast posts only.
     """
-    return (
-        f"<!channel> Yo, Reach'em here, <@{requester_id}> needs a quick word with "
-        f"<@{target_id}> (s)He says:\n{message}"
-    )
+    if target_id:
+        context = f"needs a quick word with <@{target_id}>"
+    else:
+        context = "is asking around"
+    return f"<!channel> Yo, Reach'em here, <@{requester_id}> {context}. (s)He says:\n{message}"
 
 
 def dm_text(message: str, requester_id: str, target_id: str) -> str:
@@ -54,6 +55,98 @@ def render_reach_stage1() -> dict[str, Any]:
     }
 
 
+def render_quick_people_modal(
+    target_id: str, *, requester_id: str, target_name: str | None = None
+) -> dict[str, Any]:
+    """Compact `/reach @person` modal: manual recipients plus message only."""
+    target_name = target_name or target_id
+    return {
+        "type": "modal",
+        "callback_id": "reach_quick_people_submit",
+        "private_metadata": json.dumps(
+            {"requester_id": requester_id, "target_id": target_id, "target_name": target_name},
+            separators=(",", ":"),
+        ),
+        "title": {"type": "plain_text", "text": "Reach someone"},
+        "submit": {"type": "plain_text", "text": "Send"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "candidates",
+                "label": {"type": "plain_text", "text": "Who should we ask?"},
+                "element": {
+                    "type": "multi_users_select",
+                    "action_id": "candidates",
+                    "placeholder": {"type": "plain_text", "text": "Add people who might know"},
+                },
+                "optional": False,
+            },
+            _quick_message_block(target_name),
+        ],
+    }
+
+
+def render_quick_channels_modal(
+    *, requester_id: str, target_id: str = "", initial_channels: list[str] | None = None,
+    target_name: str | None = None,
+) -> dict[str, Any]:
+    """Compact `/reach #channel` modal with no implicit channel assumption."""
+    channels: dict[str, Any] = {
+        "type": "multi_conversations_select",
+        "action_id": "channels_choice",
+        "placeholder": {"type": "plain_text", "text": "Choose channels"},
+        "filter": {"include": ["public", "private"]},
+    }
+    # Only explicit command arguments are initialised. In particular, never
+    # search for or assume a channel named "general".
+    if initial_channels:
+        channels["initial_conversations"] = initial_channels
+    return {
+        "type": "modal",
+        "callback_id": "reach_quick_channels_submit",
+        "private_metadata": json.dumps(
+            {
+                "requester_id": requester_id,
+                "target_id": target_id,
+                "target_name": target_name or target_id,
+            },
+            separators=(",", ":"),
+        ),
+        "title": {"type": "plain_text", "text": "Reach a channel"},
+        "submit": {"type": "plain_text", "text": "Send"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "broadcast_channels",
+                "label": {"type": "plain_text", "text": "Channels to ask"},
+                "element": channels,
+                "optional": False,
+            },
+            _quick_message_block(target_name or target_id),
+        ],
+    }
+
+
+def _quick_message_block(target_name: str) -> dict[str, Any]:
+    initial = (
+        f"Have you seen {target_name}? " + DEFAULT_MESSAGE if target_name else DEFAULT_MESSAGE
+    )
+    return {
+        "type": "input",
+        "block_id": "message",
+        "label": {"type": "plain_text", "text": "Message"},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "message_input",
+            "initial_value": initial,
+            "placeholder": {"type": "plain_text", "text": "Type a short message"},
+            "multiline": False,
+        },
+    }
+
+
 SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("none", "None (just the people above)"),
     ("channel", "Everyone in a channel"),
@@ -66,7 +159,7 @@ RETENTION_UNITS: tuple[tuple[str, str], ...] = (
 )
 
 
-def render_reach_stage2(
+def render_reach_audience(
     target_id: str,
     *,
     requester_id: str,
@@ -74,15 +167,12 @@ def render_reach_stage2(
     scope: str = "none",
     initial_candidates: list[str] | None = None,
     initial_channel: str | None = None,
-    message_value: str | None = None,
-    retention_amount: str | None = None,
-    retention_unit: str = "hours",
 ) -> dict[str, Any]:
-    """Stage 2: the recipient-selection modal, built from static content.
+    """Audience stage: recipients and optional broadcast scope.
 
-    ``scope``, ``initial_candidates``, ``initial_channel``, and
-    ``message_value`` exist so the ``scope_choice`` listener can re-render
-    the modal with the requester's current input preserved.
+    The channel picker is intentionally part of this stage. Selecting a
+    channel only changes this view; it never creates a separate channel
+    modal.
     """
     if scope not in {value for value, _ in SCOPE_OPTIONS}:
         scope = "none"
@@ -137,10 +227,45 @@ def render_reach_stage2(
                 "element": channel_element,
             }
         )
-    # plain_text_input's initial_value is literal text -- Slack never
-    # resolves mention syntax inside it -- so bake the resolved target name
-    # in rather than mention syntax.
-    blocks.append(
+    return {
+        "type": "modal",
+        "callback_id": "reach_audience_submit",
+        "private_metadata": json.dumps(
+            {"requester_id": requester_id, "target_id": target_id, "target_name": target_name},
+            separators=(",", ":"),
+        ),
+        "title": {"type": "plain_text", "text": "Who should we ask?"},
+        "submit": {"type": "plain_text", "text": "Next"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
+
+
+def render_reach_message(
+    target_id: str,
+    *,
+    requester_id: str,
+    target_name: str | None = None,
+    candidates: list[str] | None = None,
+    scope: str = "none",
+    channel_id: str | None = None,
+    channel_ids: list[str] | None = None,
+    message_value: str | None = None,
+    retention_amount: str | None = None,
+    retention_unit: str = "hours",
+) -> dict[str, Any]:
+    """Message stage: compose the message and choose its response window."""
+    if target_name is None:
+        target_name = target_id
+    if retention_unit not in {value for value, _ in RETENTION_UNITS}:
+        retention_unit = "hours"
+    unit_options = [
+        {"text": {"type": "plain_text", "text": label}, "value": value}
+        for value, label in RETENTION_UNITS
+    ]
+    if retention_unit not in {value for value, _ in RETENTION_UNITS}:
+        retention_unit = "hours"
+    blocks: list[dict[str, Any]] = [
         {
             "type": "input",
             "block_id": "message",
@@ -153,60 +278,58 @@ def render_reach_stage2(
                 "placeholder": {"type": "plain_text", "text": "Type a short message"},
                 "multiline": False,
             },
-        }
-    )
-    unit_options = [
-        {"text": {"type": "plain_text", "text": label}, "value": value}
-        for value, label in RETENTION_UNITS
+        },
+        {
+            "type": "input",
+            "block_id": "retention_amount",
+            "label": {"type": "plain_text", "text": "Response window"},
+            "optional": False,
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "retention_amount_input",
+                "initial_value": retention_amount or "",
+                "placeholder": {"type": "plain_text", "text": "Stop accepting replies after…"},
+                "multiline": False,
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "retention_unit",
+            "label": {"type": "plain_text", "text": "Time unit"},
+            "element": {
+                "type": "static_select",
+                "action_id": "retention_unit_choice",
+                "options": unit_options,
+                "initial_option": next(
+                    option for option in unit_options if option["value"] == retention_unit
+                ),
+            },
+        },
     ]
-    if retention_unit not in {value for value, _ in RETENTION_UNITS}:
-        retention_unit = "hours"
-    blocks.extend(
-        [
-            {
-                "type": "input",
-                "block_id": "retention_amount",
-                "label": {"type": "plain_text", "text": "Keep the message for"},
-                "optional": False,
-                "element": {
-                    "type": "plain_text_input",
-                    "action_id": "retention_amount_input",
-                    "initial_value": retention_amount or "",
-                    "placeholder": {"type": "plain_text", "text": "e.g. 2"},
-                    "multiline": False,
-                },
-            },
-            {
-                "type": "input",
-                "block_id": "retention_unit",
-                "label": {"type": "plain_text", "text": "Time unit"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "retention_unit_choice",
-                    "options": unit_options,
-                    "initial_option": next(
-                        option for option in unit_options if option["value"] == retention_unit
-                    ),
-                },
-            },
-        ]
-    )
     return {
         "type": "modal",
-        "callback_id": "reach_submit",
+        "callback_id": "reach_message_submit",
         "private_metadata": json.dumps(
             {
                 "requester_id": requester_id,
                 "target_id": target_id,
                 "target_name": target_name,
+                "candidates": candidates or [],
+                "scope": scope,
+                "channel_id": channel_id or "",
+                "channel_ids": channel_ids or ([channel_id] if channel_id else []),
             },
             separators=(",", ":"),
         ),
-        "title": {"type": "plain_text", "text": "Reach someone"},
+        "title": {"type": "plain_text", "text": "Compose your message"},
         "submit": {"type": "plain_text", "text": "Send"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
     }
+
+
+# Kept as a small compatibility alias for callers that used the old renderer.
+render_reach_stage2 = render_reach_audience
 
 
 def _button(

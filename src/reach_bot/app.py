@@ -44,6 +44,7 @@ register_handlers(
     slack_app,
     repository=repository,
     known_response_limit=settings.known_response_limit,
+    quick_reach_retention_hours=settings.quick_reach_retention_hours,
 )
 
 
