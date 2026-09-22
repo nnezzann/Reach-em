@@ -48,7 +48,8 @@ RETENTION_FEATURE_INTRODUCED_AT = datetime(2026, 9, 21, tzinfo=UTC)
 
 # Background fan-out tasks; kept referenced so they are not garbage-collected.
 _background_tasks: set[asyncio.Task[Any]] = set()
-_USER_TOKEN = re.compile(r"^<@([A-Z0-9]+)>$|^@([A-Za-z0-9_.-]+)$")
+QUICK_REACH_RETENTION_HOURS = 24
+_USER_TOKEN = re.compile(r"^<@([A-Z0-9]+)(?:\|[^>]+)?>$|^@([A-Za-z0-9_.-]+)$")
 _CHANNEL_TOKEN = re.compile(r"^<#([A-Z0-9]+)(?:\|[^>]+)?>$|^#([A-Za-z0-9_.-]+)$")
 
 
@@ -93,12 +94,21 @@ async def _resolve_user_tokens(client: Any, tokens: list[str]) -> tuple[list[str
     canonical_ids = [_USER_TOKEN.match(token) for token in tokens]
     if all(match is not None and match.group(1) for match in canonical_ids):
         return [str(match.group(1)) for match in canonical_ids if match is not None], None
-    response = await client.users_list(limit=200)
-    users = [
-        user
-        for user in response.get("members", response.get("users", []))
-        if not user.get("deleted")
-    ]
+    users: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {"limit": 200}
+        if cursor:
+            kwargs["cursor"] = cursor
+        response = await client.users_list(**kwargs)
+        users.extend(
+            user
+            for user in response.get("members", response.get("users", []))
+            if not user.get("deleted")
+        )
+        cursor = response.get("response_metadata", {}).get("next_cursor") or None
+        if not cursor:
+            break
     resolved: list[str] = []
     for token in tokens:
         match = _USER_TOKEN.match(token)
@@ -130,14 +140,25 @@ async def _resolve_channel_tokens(client: Any, tokens: list[str]) -> tuple[list[
     canonical_ids = [_CHANNEL_TOKEN.match(token) for token in tokens]
     if all(match is not None and match.group(1) for match in canonical_ids):
         return [str(match.group(1)) for match in canonical_ids if match is not None], None
-    response = await client.conversations_list(
-        types="public_channel,private_channel", exclude_archived=True, limit=200
-    )
-    channels = [
-        channel
-        for channel in response.get("channels", [])
-        if not channel.get("is_archived")
-    ]
+    channels: list[dict[str, Any]] = []
+    cursor = None
+    while True:
+        kwargs = {
+            "types": "public_channel,private_channel",
+            "exclude_archived": True,
+            "limit": 200,
+        }
+        if cursor:
+            kwargs["cursor"] = cursor
+        response = await client.conversations_list(**kwargs)
+        channels.extend(
+            channel
+            for channel in response.get("channels", [])
+            if not channel.get("is_archived")
+        )
+        cursor = response.get("response_metadata", {}).get("next_cursor") or None
+        if not cursor:
+            break
     resolved: list[str] = []
     for token in tokens:
         match = _CHANNEL_TOKEN.match(token)
@@ -369,7 +390,6 @@ def register_handlers(
     *,
     repository: ReachRepository,
     known_response_limit: int = 3,
-    quick_reach_retention_hours: int = 2,
 ) -> None:
     @slack_app.command("/reach")  # type: ignore[untyped-decorator]
     async def reach_command(
@@ -443,7 +463,7 @@ def register_handlers(
                 scope="none",
                 channel_ids=[],
                 message_values=values.get("message", {}),
-                retention_hours=quick_reach_retention_hours,
+                retention_hours=QUICK_REACH_RETENTION_HOURS,
             ),
             client=client,
         )
@@ -473,7 +493,7 @@ def register_handlers(
                 scope="channel",
                 channel_ids=[str(channel) for channel in channel_ids],
                 message_values=values.get("message", {}),
-                retention_hours=quick_reach_retention_hours,
+                retention_hours=QUICK_REACH_RETENTION_HOURS,
             ),
             client=client,
         )

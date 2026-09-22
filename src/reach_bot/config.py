@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     affinity_decay_halflife_days: float = 30.0
     presence_cache_ttl_seconds: int = 45
     known_response_limit: int = 3
-    quick_reach_retention_hours: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"

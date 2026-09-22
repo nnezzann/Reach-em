@@ -159,8 +159,8 @@ The ranking/suggestion machinery is currently dormant; the bot uses manual recip
 For fast use, `/reach @username` opens the manual-recipient modal directly,
 while `/reach #channel` opens the channel modal with only explicitly typed
 channels initialized. `/reach @username #channel` combines both. The quick
-modals omit scope radios and response-window inputs; they use the configured
-quick-path retention default. User and channel mentions are resolved to Slack
+modals omit scope radios and response-window inputs; every shortcut message is
+automatically deleted after 24 hours. User and channel mentions are resolved to Slack
 IDs before any modal or outgoing message is built—no typed display name is
 used as a mention.
 

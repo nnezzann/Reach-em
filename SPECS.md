@@ -862,8 +862,9 @@ All outgoing mentions are generated from resolved IDs, never from command
 text.
 
 Quick modals omit broadcast radio buttons and the response-window fields.
-They use the configured quick-path retention default internally so message
-cleanup and all response-counting behavior remain unchanged.
+They use a fixed 24-hour retention internally so shortcut messages are
+automatically deleted after one day. Message cleanup and all response-counting
+behavior remain unchanged.
 
 ---
 
