@@ -290,18 +290,122 @@ def apply_migrations(connection: Any) -> None:
     """Run every ``.sql`` migration in ``src/reach_bot/migrations`` in order.
 
     Called once when ``PostgresRepository`` is instantiated, before any
-    query that assumes the tables exist. The migrations are idempotent
-    (``CREATE TABLE IF NOT EXISTS``), so re-running on every startup is safe.
+    query that assumes the tables exist. Applied migrations are recorded so
+    restart/deploy cycles do not repeatedly take DDL locks on already-current
+    tables. The advisory lock also prevents two app instances from migrating
+    the database concurrently during a rolling deploy.
     """
     migrations_dir = Path(__file__).parent / "migrations"
     if not migrations_dir.is_dir():
         return
-    for migration_file in sorted(migrations_dir.glob("*.sql")):
-        sql = migration_file.read_text()
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_lock(hashtext('reach-em:migrations'))")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reach_schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+    connection.commit()
+
+    try:
+        for migration_file in sorted(migrations_dir.glob("*.sql")):
+            version = migration_file.name
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM reach_schema_migrations WHERE version = %s",
+                    (version,),
+                )
+                already_applied = cursor.fetchone() is not None
+            if already_applied:
+                log.info("Migration %s already applied", version)
+                continue
+
+            if _migration_schema_is_current(connection, version):
+                _record_migration(connection, version)
+                log.info("Migration %s already satisfied", version)
+                continue
+
+            sql = migration_file.read_text()
+            with connection.cursor() as cursor:
+                cursor.execute(sql)
+            _record_migration(connection, version)
+            log.info("Applied migration %s", version)
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
         with connection.cursor() as cursor:
-            cursor.execute(sql)
+            cursor.execute("SELECT pg_advisory_unlock(hashtext('reach-em:migrations'))")
         connection.commit()
-        log.info("Applied migration %s", migration_file.name)
+
+
+def _record_migration(connection: Any, version: str) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO reach_schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING",
+            (version,),
+        )
+    connection.commit()
+
+
+def _migration_schema_is_current(connection: Any, version: str) -> bool:
+    """Avoid re-taking DDL locks when an older database is already upgraded."""
+    requirements: dict[str, tuple[tuple[str, str], ...]] = {
+        "001_initial.sql": (
+            ("table", "reach_requests"),
+            ("table", "pings"),
+            ("table", "ping_outcomes"),
+            ("table", "affinity_scores"),
+        ),
+        "002_response_limit.sql": (
+            ("reach_requests", "known_count"),
+            ("pings", "channel"),
+            ("pings", "message_ts"),
+            ("ping_outcomes", "location"),
+        ),
+        "003_broadcast_local_thresholds.sql": (
+            ("pings", "local_know_count"),
+            ("pings", "local_total_count"),
+            ("pings", "broadcast_closed"),
+            ("table", "broadcast_responses"),
+        ),
+        "004_message_retention.sql": (
+            ("pings", "expires_at"),
+            ("pings", "deleted_at"),
+        ),
+        # 005 is a data repair, not a schema migration, so it must execute.
+        "005_repair_broadcast_threshold_state.sql": (),
+    }
+    required = requirements.get(version)
+    if required is None or not required:
+        return False
+
+    with connection.cursor() as cursor:
+        for table, column in required:
+            if table == "table":
+                cursor.execute(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = current_schema() AND table_name = %s
+                    """,
+                    (column,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = %s AND column_name = %s
+                    """,
+                    (table, column),
+                )
+            if cursor.fetchone() is None:
+                return False
+    return True
 
 
 class PostgresRepository:
